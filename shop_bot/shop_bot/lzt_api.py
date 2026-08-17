@@ -17,58 +17,89 @@ _last_search_ts = 0.0
 SEARCH_MIN_INTERVAL = 3.0
 BLOCKED_ORIGINS = ("phishing", "stealer")
 
+# Глобальная сессия aiohttp — переиспользуем соединения
+_session = None
+
+async def _get_session():
+    global _session
+    if _session is None or _session.closed:
+        _session = aiohttp.ClientSession()
+    return _session
+
 async def lzt_request(endpoint: str, method="GET", params=None, json_data=None):
     async with _lzt_semaphore:
         async with _lzt_lock:
             await asyncio.sleep(LZT_RATE_LIMIT)
-        headers = {"Authorization": f"Bearer {LZT_TOKEN}", "Content-Type": "application/json"}
+
+        headers = {
+            "Authorization": f"Bearer {LZT_TOKEN}",
+            "Content-Type": "application/json",
+        }
         url = f"{BASE_URL}{endpoint}"
+
+        # aiohttp корректно обрабатывает dict params; list конвертируем
         if isinstance(params, list):
-            param_str = "&".join(f"{k}={v}" for k, v in params)
-        else:
-            param_str = "&".join(f"{k}={v}" for k, v in (params or {}).items())
-        full_url = f"{url}?{param_str}" if param_str else url
-        logger.info(f"LZT REQUEST: {method} {full_url}")
+            params = dict(params)
+
+        logger.info(f"LZT REQUEST: {method} {url} params={params}")
+
         last_exception = None
         for attempt in range(3):
-            async with aiohttp.ClientSession() as session:
-                try:
-                    timeout = aiohttp.ClientTimeout(total=15 if method == "GET" else 60)
-                    if method == "GET":
-                        async with session.get(url, headers=headers, params=params, timeout=timeout) as resp:
-                            text = await resp.text()
-                            try:
-                                data = __import__("json").loads(text)
-                            except Exception:
-                                data = {"error": "Invalid JSON", "raw": text[:500]}
-                            data["_http_status"] = resp.status
-                            if resp.status == 401:
-                                data["_token_expired"] = True
-                            return data
-                    elif method == "POST":
-                        async with session.post(url, headers=headers, json=json_data, params=params, timeout=timeout) as resp:
-                            text = await resp.text()
-                            try:
-                                data = __import__("json").loads(text)
-                            except Exception:
-                                data = {"error": "Invalid JSON", "raw": text[:500]}
-                            data["_http_status"] = resp.status
-                            if resp.status == 401:
-                                data["_token_expired"] = True
-                            return data
-                    elif method == "PUT":
-                        async with session.put(url, headers=headers, json=json_data, timeout=timeout) as resp:
-                            text = await resp.text()
-                            try:
-                                data = __import__("json").loads(text)
-                            except Exception:
-                                data = {"error": "Invalid JSON", "raw": text[:500]}
-                            data["_http_status"] = resp.status
-                            return data
-                except Exception as e:
-                    logger.error(f"LZT API exception (attempt {attempt+1}/3): {e}")
-                    last_exception = e
-                    await asyncio.sleep(1 * (attempt + 1))
+            session = await _get_session()
+            try:
+                timeout = aiohttp.ClientTimeout(total=15 if method == "GET" else 60)
+                if method == "GET":
+                    async with session.get(url, headers=headers, params=params, timeout=timeout) as resp:
+                        text = await resp.text()
+                        # 429 Too Many Requests — ждём и ретраим
+                        if resp.status == 429:
+                            retry_after = int(resp.headers.get("Retry-After", 5))
+                            logger.warning(f"LZT 429, retry after {retry_after}s (attempt {attempt+1}/3)")
+                            await asyncio.sleep(retry_after)
+                            continue
+                        try:
+                            data = __import__("json").loads(text)
+                        except Exception:
+                            data = {"error": "Invalid JSON", "raw": text[:500]}
+                        data["_http_status"] = resp.status
+                        if resp.status == 401:
+                            data["_token_expired"] = True
+                        return data
+                elif method == "POST":
+                    async with session.post(url, headers=headers, json=json_data, params=params, timeout=timeout) as resp:
+                        text = await resp.text()
+                        if resp.status == 429:
+                            retry_after = int(resp.headers.get("Retry-After", 5))
+                            logger.warning(f"LZT 429, retry after {retry_after}s (attempt {attempt+1}/3)")
+                            await asyncio.sleep(retry_after)
+                            continue
+                        try:
+                            data = __import__("json").loads(text)
+                        except Exception:
+                            data = {"error": "Invalid JSON", "raw": text[:500]}
+                        data["_http_status"] = resp.status
+                        if resp.status == 401:
+                            data["_token_expired"] = True
+                        return data
+                elif method == "PUT":
+                    async with session.put(url, headers=headers, json=json_data, timeout=timeout) as resp:
+                        text = await resp.text()
+                        if resp.status == 429:
+                            retry_after = int(resp.headers.get("Retry-After", 5))
+                            logger.warning(f"LZT 429, retry after {retry_after}s (attempt {attempt+1}/3)")
+                            await asyncio.sleep(retry_after)
+                            continue
+                        try:
+                            data = __import__("json").loads(text)
+                        except Exception:
+                            data = {"error": "Invalid JSON", "raw": text[:500]}
+                        data["_http_status"] = resp.status
+                        return data
+            except Exception as e:
+                logger.error(f"LZT API exception (attempt {attempt+1}/3): {e}")
+                last_exception = e
+                await asyncio.sleep(1 * (attempt + 1))
+
         return {"error": str(last_exception), "_http_status": 0}
 
 def _extract_items(data):
@@ -260,7 +291,6 @@ async def get_account_data_lzt(item_id: int):
         data["session"] = login_data.get("raw") or ""
     return data
 
-# FIX: добавлен get_item_secure_data
 async def get_item_secure_data(item_id: int):
     """Получение защищённых данных после покупки (paid). Fallback на check-account."""
     endpoint = f"/{item_id}/get-secure-data"
