@@ -1,6 +1,6 @@
 from aiogram import Router, types, F
 from tg_utils import safe_answer, safe_edit
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
@@ -9,7 +9,8 @@ from database import (
     add_favorite, get_favorites, remove_favorite, purchase_account_tx,
     purchase_existing_account_tx, add_to_cart
 )
-from lzt_api import search_telegram_accounts, fast_buy, get_account_data_lzt, get_lzt_balance, cancel_buy, confirm_buy
+# FIX: заменяем get_account_data_lzt → get_item_secure_data, убираем cancel_buy и confirm_buy из импорта
+from lzt_api import search_telegram_accounts, fast_buy, get_item_secure_data, get_lzt_balance
 from keyboards import (
     buy_main_kb, countries_kb, country_type_kb,
     filters_kb, back_to_main_kb, back_to_buy_kb, back_to_countries_kb,
@@ -26,7 +27,7 @@ router = Router()
 
 user_filters = {}
 user_lzt_cart = {}
-user_pending_item = {}  # для страховки: {user_id: {...item...}}
+user_pending_item = {} # для страховки: {user_id: {...item...}}
 
 class SearchState(StatesGroup):
     waiting_country = State()
@@ -45,14 +46,11 @@ country_map = {
     "KE": ("Кения", "🇰🇪"), "ZA": ("ЮАР", "🇿🇦"),
 }
 
-
 def get_country_name(code):
     return country_map.get(code, (code, ""))[0]
 
-
 def get_country_flag(code):
     return country_map.get(code, ("", "🏳️"))[1]
-
 
 def discount_percent(qty: int) -> float:
     if qty >= 4:
@@ -63,12 +61,10 @@ def discount_percent(qty: int) -> float:
         return 0.03
     return 0.0
 
-
 def calculate_price(qty: int, base_price: float) -> float:
     disc = discount_percent(qty)
     total = qty * base_price * (1 - disc)
     return round(total, 2)
-
 
 def build_account_card(item: dict, base_price: float, country_code: str, account_type: str) -> str:
     """Красивая карточка товара с эмодзи-прогрессом и характеристиками."""
@@ -76,7 +72,6 @@ def build_account_card(item: dict, base_price: float, country_code: str, account
     flag = get_country_flag(country_code)
     type_label = "🧑 Саморег (физ)" if account_type == "samoreg" else "🤖 Авторег (вирт)"
 
-    # Характеристики
     age = item.get("item_age_days")
     age_str = f"{age} дней" if age is not None else "неизвестно"
     avatar = "✅ Есть" if item.get("has_avatar") else "❌ Нет"
@@ -86,21 +81,20 @@ def build_account_card(item: dict, base_price: float, country_code: str, account
     premium = "✅ Есть" if item.get("has_premium") else "❌ Нет"
 
     text = (
-        f"{flag} <b>{name}</b> — {type_label}\n"
+        f"{flag} **{name}** — {type_label}\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"💰 <b>Цена:</b> {int(base_price)}₽\n"
+        f"💰 **Цена:** {int(base_price)}₽\n"
         f"\n"
-        f"📊 <b>Характеристики:</b>\n"
+        f"📊 **Характеристики:**\n"
         f"  ⏱ Возраст: {age_str}\n"
         f"  🖼 Аватарка: {avatar}\n"
         f"  📅 Регистрация: {reg}\n"
         f"  👥 Контакты: {contacts_str}\n"
         f"  ⭐ Премиум: {premium}\n"
         f"\n"
-        f"🛡 <b>Гарантия:</b> 24 часа (или пожизненная со страховкой)\n"
+        f"🛡 **Гарантия:** 24 часа (или пожизненная со страховкой)\n"
     )
     return text
-
 
 def build_cart_text(user_id: int) -> str:
     cart = user_lzt_cart.get(user_id)
@@ -126,11 +120,10 @@ def build_cart_text(user_id: int) -> str:
     if disc > 0:
         text += f"Скидка: {int(disc * 100)}% ({int(price_per)}₽/шт)\n"
     text += (
-        f"\n📦 Доступно: <b>{available} шт</b>\n"
+        f"\n📦 Доступно: **{available} шт**\n"
         f"Покупаем {qty} шт?"
     )
     return text
-
 
 async def notify_admin_purchase(bot, text: str):
     if ADMIN_CHAT_ID:
@@ -142,11 +135,10 @@ async def notify_admin_purchase(bot, text: str):
         except Exception:
             pass
 
-
 @router.callback_query(F.data == "buy_menu")
 async def buy_menu(callback: CallbackQuery):
     text = (
-        "📋 <b>Покупка аккаунта</b>\n"
+        "📋 **Покупка аккаунта**\n"
         "Выберите действие:\n"
         "• 🌍 Посмотреть страны — выбрать страну и тип аккаунта\n"
         "• ⚙️ Фильтр — расширенный поиск по параметрам\n"
@@ -157,29 +149,26 @@ async def buy_menu(callback: CallbackQuery):
     await safe_edit(callback, text, reply_markup=buy_main_kb)
     await safe_answer(callback, )
 
-
 @router.callback_query(F.data == "view_countries")
 async def view_countries(callback: CallbackQuery):
     text = (
-        "🌍 <b>Доступные страны</b>\n"
+        "🌍 **Доступные страны**\n"
         "Выберите страну из списка ниже.\n"
         "Нажмите на страну, чтобы выбрать тип аккаунта."
     )
     await safe_edit(callback, text, reply_markup=countries_kb(page=0))
     await safe_answer(callback, )
 
-
 @router.callback_query(F.data.startswith("country_page:"))
 async def country_page(callback: CallbackQuery):
     page = int(callback.data.split(":")[1])
     text = (
-        "🌍 <b>Доступные страны</b>\n"
+        "🌍 **Доступные страны**\n"
         "Выберите страну из списка ниже.\n"
         "Нажмите на страну, чтобы выбрать тип аккаунта."
     )
     await safe_edit(callback, text, reply_markup=countries_kb(page=page))
     await safe_answer(callback, )
-
 
 @router.callback_query(F.data.startswith("select_country:"))
 async def select_country(callback: CallbackQuery):
@@ -188,19 +177,16 @@ async def select_country(callback: CallbackQuery):
     flag = get_country_flag(country_code)
 
     text = (
-        f"{flag} <b>{name}</b>\n"
+        f"{flag} **{name}**\n"
         "Выберите тип аккаунта:\n"
-        "• 🧑 <b>Саморег (физ)</b> — физические SIM-карты, живые регистрации\n"
-        "• 🤖 <b>Авторег (вирт)</b> — виртуальные номера, автоматическая регистрация"
+        "• 🧑 **Саморег (физ)** — физические SIM-карты, живые регистрации\n"
+        "• 🤖 **Авторег (вирт)** — виртуальные номера, автоматическая регистрация"
     )
     await safe_edit(callback, text, reply_markup=country_type_kb(country_code))
     await safe_answer(callback, )
 
-
 @router.callback_query(F.data.startswith("select_type:"))
 async def select_type(callback: CallbackQuery):
-    # ВАЖНО: отвечаем на callback СРАЗУ — поиск по LZT занимает 3+ сек,
-    # иначе Telegram выдаёт "query is too old" и пользователь видит Bot Error.
     await safe_answer(callback)
 
     parts = callback.data.split(":")
@@ -212,7 +198,7 @@ async def select_type(callback: CallbackQuery):
     type_label = "саморег" if account_type == "samoreg" else "авторег"
 
     await safe_edit(callback,
-        f"⏳ <b>Загрузка карточек...</b>\n{progress_kb(0).inline_keyboard[0][0].text}",
+        f"⏳ **Загрузка карточек...**\n{progress_kb(0).inline_keyboard[0][0].text}",
         reply_markup=progress_kb(0)
     )
 
@@ -220,8 +206,8 @@ async def select_type(callback: CallbackQuery):
 
     if isinstance(lzt_result, dict) and lzt_result.get("error") == "token_expired":
         text = (
-            f"{flag} <b>{name}</b>\n"
-            "⚠️ <b>Каталог временно недоступен</b>\n"
+            f"{flag} **{name}**\n"
+            "⚠️ **Каталог временно недоступен**\n"
             "Ведутся технические работы. Попробуйте позже."
         )
         await safe_edit(callback, text, reply_markup=back_to_countries_kb)
@@ -233,8 +219,8 @@ async def select_type(callback: CallbackQuery):
 
     if not lzt_items:
         text = (
-            f"{flag} <b>{name}</b>\n"
-            f"❌ Сейчас нет аккаунтов типа <b>{type_label}</b> для этой страны.\n"
+            f"{flag} **{name}**\n"
+            f"❌ Сейчас нет аккаунтов типа **{type_label}** для этой страны.\n"
             "Попробуйте выбрать другой тип или страну."
         )
         await safe_edit(callback, text, reply_markup=back_to_countries_kb)
@@ -245,16 +231,14 @@ async def select_type(callback: CallbackQuery):
     avg_lzt = sum(lzt_prices) / len(lzt_prices)
     base_price = round(avg_lzt * 2, 2)
 
-    # Рекомендации: показываем топ-3
     top_items = lzt_items[:3]
-    rec_text = "\n🎯 <b>Рекомендуем:</b>\n"
+    rec_text = "\n🎯 **Рекомендуем:**\n"
     for idx, item in enumerate(top_items, 1):
         age = item.get("item_age_days")
         age_str = f"{age}д" if age else "?"
         premium = "⭐" if item.get("has_premium") else ""
-        rec_text += f"  {idx}. Аккаунт #{idx} — возраст {age_str} {premium}\n"
+        rec_text += f" {idx}. Аккаунт #{idx} — возраст {age_str} {premium}\n"
 
-    # Показываем первую карточку
     first_item = lzt_items[0]
     card_text = build_account_card(first_item, base_price, country_code, account_type)
 
@@ -273,7 +257,6 @@ async def select_type(callback: CallbackQuery):
     kb = account_card_kb(first_item["item_id"], base_price, country_code, account_type)
     await safe_edit(callback, full_text, reply_markup=kb)
     await safe_answer(callback, )
-
 
 @router.callback_query(F.data.startswith("cart_plus:"))
 async def cart_plus(callback: CallbackQuery):
@@ -297,7 +280,6 @@ async def cart_plus(callback: CallbackQuery):
     await safe_edit(callback, text, reply_markup=kb)
     await safe_answer(callback, )
 
-
 @router.callback_query(F.data.startswith("cart_minus:"))
 async def cart_minus(callback: CallbackQuery):
     parts = callback.data.split(":")
@@ -320,20 +302,17 @@ async def cart_minus(callback: CallbackQuery):
     await safe_edit(callback, text, reply_markup=kb)
     await safe_answer(callback, )
 
-
 @router.callback_query(F.data.startswith("cart_remove:"))
 async def cart_remove(callback: CallbackQuery):
     user_lzt_cart.pop(callback.from_user.id, None)
-    await safe_edit(callback, 
+    await safe_edit(callback,
         "❌ Аккаунт убран из корзины.",
         reply_markup=back_to_countries_kb
     )
     await safe_answer(callback, "✅ Убрано")
 
-
 @router.callback_query(F.data.startswith("add_to_cart:"))
 async def add_to_cart_handler(callback: CallbackQuery):
-    """Добавление текущего лота в корзину пользователя."""
     item_id = int(callback.data.split(":")[1])
     user_id = callback.from_user.id
     cart = user_lzt_cart.get(user_id)
@@ -365,16 +344,13 @@ async def add_to_cart_handler(callback: CallbackQuery):
         has_premium=item.get("has_premium", False),
     )
     add_log(user_id, "add_to_cart", f"item_id={item_id}, price={cart['base_price']}")
-    await safe_answer(callback, 
+    await safe_answer(callback,
         f"✅ Добавлено в корзину!\n{cart['country_name']} — {int(cart['base_price'])}₽",
         show_alert=True
     )
 
-
-# ========== НОВЫЙ ПОТОК: ПРЕДЛОЖЕНИЕ СТРАХОВКИ ==========
 @router.callback_query(F.data.startswith("pre_buy:"))
 async def pre_buy_handler(callback: CallbackQuery):
-    """Перед покупкой предлагаем страховку."""
     item_id = int(callback.data.split(":")[1])
     user_id = callback.from_user.id
     cart = user_lzt_cart.get(user_id)
@@ -382,7 +358,6 @@ async def pre_buy_handler(callback: CallbackQuery):
         await safe_answer(callback, "❌ Сессия истекла", show_alert=True)
         return
 
-    # Находим item
     item = None
     for it in cart["items"]:
         if it["item_id"] == item_id:
@@ -402,33 +377,40 @@ async def pre_buy_handler(callback: CallbackQuery):
     insured = round(base * 1.2, 2)
 
     text = (
-        f"🛡 <b>Выберите тип гарантии</b>\n\n"
-        f"📦 Аккаунт: <b>{cart['country_name']}</b>\n"
-        f"💰 Базовая цена: <b>{int(base)}₽</b>\n\n"
-        f"1️⃣ <b>Стандарт</b> — {int(base)}₽\n"
-        f"   ✅ Гарантия 24 часа\n"
-        f"   ⚠️ После 24ч — без права на возврат\n\n"
-        f"2️⃣ <b>Страховка (+20%)</b> — {int(insured)}₽\n"
-        f"   🛡 <b>Пожизненная гарантия</b>\n"
-        f"   ✅ Возврат или замена навсегда\n"
-        f"   💎 Приоритет в поддержке\n\n"
+        f"🛡 **Выберите тип гарантии**\n\n"
+        f"📦 Аккаунт: **{cart['country_name']}**\n"
+        f"💰 Базовая цена: **{int(base)}₽**\n\n"
+        f"1️⃣ **Стандарт** — {int(base)}₽\n"
+        f"  ✅ Гарантия 24 часа\n"
+        f"  ⚠️ После 24ч — без права на возврат\n\n"
+        f"2️⃣ **Страховка (+20%)** — {int(insured)}₽\n"
+        f"  🛡 **Пожизненная гарантия**\n"
+        f"  ✅ Возврат или замена навсегда\n"
+        f"  💎 Приоритет в поддержке\n\n"
         f"Выберите вариант:"
     )
     await safe_edit(callback, text, reply_markup=insurance_kb)
     await safe_answer(callback, )
 
-
 @router.callback_query(F.data == "buy_insured")
 async def buy_insured(callback: CallbackQuery):
     await _do_buy(callback, insured=True)
-
 
 @router.callback_query(F.data == "buy_no_insurance")
 async def buy_no_insurance(callback: CallbackQuery):
     await _do_buy(callback, insured=False)
 
-
+# ========== ИСПРАВЛЕННАЯ _do_buy ==========
 async def _do_buy(callback: CallbackQuery, insured: bool):
+    """
+    ИСПРАВЛЕНИЕ: убран автоматический cancel_buy после fast_buy.
+    Логика:
+    1. fast_buy — резерв/покупка
+    2. get_item_secure_data — получение данных (check-account)
+    3. Если данные получены → списываем баланс, выдаём пользователю
+    4. Если данные НЕ получены → НЕ списываем баланс, НЕ делаем cancel (товар уже paid),
+       сообщаем админу для ручной выдачи
+    """
     user_id = callback.from_user.id
     pending = user_pending_item.pop(user_id, None)
     if not pending:
@@ -441,7 +423,7 @@ async def _do_buy(callback: CallbackQuery, insured: bool):
     price = round(base_price * 1.2, 2) if insured else base_price
 
     if is_purchases_paused():
-        await safe_answer(callback, 
+        await safe_answer(callback,
             "🛑 Покупки временно приостановлены.\n"
             "Ведутся технические работы. Попробуйте позже.",
             show_alert=True
@@ -467,7 +449,7 @@ async def _do_buy(callback: CallbackQuery, insured: bool):
     item_id = item["item_id"]
     lzt_price = item["price"]
 
-    # Блокируем лот, чтобы два покупателя не зарезервировали один аккаунт
+    # Блокируем лот
     if not acquire_item_lock(item_id, user_id):
         await safe_answer(callback,
             "⚠️ Этот аккаунт сейчас покупает другой пользователь.\n"
@@ -478,65 +460,66 @@ async def _do_buy(callback: CallbackQuery, insured: bool):
 
     await safe_answer(callback, "⏳ Покупаем аккаунт...")
     await safe_edit(callback,
-        "⏳ <b>Покупка аккаунта...</b>\n" + progress_kb(1).inline_keyboard[0][0].text,
+        "⏳ **Покупка аккаунта...**\n" + progress_kb(1).inline_keyboard[0][0].text,
         reply_markup=progress_kb(1)
     )
 
+    # 1. Fast buy
     buy_result = await fast_buy(item_id)
     if buy_result.get("error") or not buy_result.get("status"):
         release_item_lock(item_id)
         await safe_edit(callback,
-            "❌ <b>Резервирование не удалось</b>\n"
+            "❌ **Резервирование не удалось**\n"
             "Лот могли купить другие. Попробуйте позже.",
             reply_markup=back_to_main_kb
         )
         return
 
-    await safe_edit(callback, 
-        "⏳ <b>Получение данных...</b>\n" + progress_kb(2).inline_keyboard[0][0].text,
+    # 2. Получение данных (secure) — НЕ делаем cancel при ошибке!
+    await safe_edit(callback,
+        "⏳ **Получение данных...**\n" + progress_kb(2).inline_keyboard[0][0].text,
         reply_markup=progress_kb(2)
     )
 
-    data_result = await get_account_data_lzt(item_id)
-    if data_result.get("error"):
-        await cancel_buy(item_id)
-        release_item_lock(item_id)
-        await safe_edit(callback,
-            "❌ <b>Не удалось получить данные</b>\n"
-            "Покупка отменена, деньги возвращены.",
-            reply_markup=back_to_main_kb
-        )
-        return
+    data_result = await get_item_secure_data(item_id)
 
-    login = data_result.get("login", "N/A")
-    password = data_result.get("password", "N/A")
-    session = data_result.get("session", "N/A")
+    login = data_result.get("login", "")
+    password = data_result.get("password", "")
+    session = data_result.get("session", "")
     has_2fa = data_result.get("2fa", False)
 
-    if login == "N/A" or not session or session == "N/A":
-        await cancel_buy(item_id)
+    # Проверяем, получены ли данные
+    if data_result.get("error") or not login or not session:
+        # КРИТИЧЕСКАЯ ОШИБКА: товар куплен (paid), но данных нет
+        # НЕ делаем cancel — это невозможно в статусе paid
         release_item_lock(item_id)
+
+        error_detail = data_result.get("error", "Данные не получены")
         await safe_edit(callback,
-            "❌ <b>Данные аккаунта повреждены</b>\n"
-            "Покупка отменена.",
+            f"❌ **Ошибка получения данных**\n"
+            f"Аккаунт куплен, но данные не удалось получить.\n"
+            f"Обратитесь в поддержку — вам выдадут данные вручную.\n"
+            f"Item ID: {item_id}",
             reply_markup=back_to_main_kb
         )
+
+        # Сообщаем админу
+        if ADMIN_CHAT_ID:
+            await callback.bot.send_message(ADMIN_CHAT_ID,
+                f"🚨 КРИТИЧЕСКАЯ ОШИБКА: данные не получены!\n"
+                f"Item ID: {item_id}\n"
+                f"Пользователь: {user_id}\n"
+                f"Ошибка: {error_detail}\n"
+                f"⚠️ НЕ делайте cancel — товар в статусе paid!\n"
+                f"Найдите данные вручную в истории покупок LZT."
+            )
         return
 
+    # 3. Списываем баланс и записываем в БД ТОЛЬКО после получения данных
     await safe_edit(callback,
-        "⏳ <b>Проверка и выдача...</b>\n" + progress_kb(3).inline_keyboard[0][0].text,
+        "⏳ **Проверка и выдача...**\n" + progress_kb(3).inline_keyboard[0][0].text,
         reply_markup=progress_kb(3)
     )
-
-    confirm_result = await confirm_buy(item_id)
-    if confirm_result.get("error"):
-        await cancel_buy(item_id)
-        release_item_lock(item_id)
-        await safe_edit(callback,
-            "❌ <b>Подтверждение покупки не удалось</b>",
-            reply_markup=back_to_main_kb
-        )
-        return
 
     account_data = (
         f"Телефон: {login}\n"
@@ -549,7 +532,7 @@ async def _do_buy(callback: CallbackQuery, insured: bool):
     # Атомарная транзакция
     result = purchase_account_tx(
         user_id=user_id,
-        account_id=0,  # создастся новый
+        account_id=0,
         price=price,
         cost_price=lzt_price,
         account_data=account_data,
@@ -566,20 +549,33 @@ async def _do_buy(callback: CallbackQuery, insured: bool):
     )
 
     if not result["ok"]:
-        await cancel_buy(item_id)
+        # Ошибка БД — товар уже куплен на LZT, но внутренний баланс не списан
+        # Это убыток владельца, но пользователь не пострадал (баланс на месте)
         release_item_lock(item_id)
         await safe_edit(callback,
-            f"❌ <b>Ошибка покупки:</b> {result.get('error', 'unknown')}",
+            f"❌ **Ошибка записи транзакции:** {result.get('error', 'unknown')}\n"
+            f"Обратитесь в поддержку. Ваш баланс НЕ списан.",
             reply_markup=back_to_main_kb
         )
+        if ADMIN_CHAT_ID:
+            await callback.bot.send_message(ADMIN_CHAT_ID,
+                f"🚨 Ошибка БД при покупке!\n"
+                f"Item ID: {item_id}\n"
+                f"Пользователь: {user_id}\n"
+                f"Ошибка: {result.get('error')}\n"
+                f"⚠️ Товар куплен на LZT, но не записан в БД бота!"
+            )
         return
+
+    # 4. Успех — выдаём данные
+    release_item_lock(item_id)
 
     guarantee_text = "🛡 Пожизненная гарантия" if insured else "🛡 Гарантия 24 часа"
     type_label = "саморег" if cart["account_type"] == "samoreg" else "авторег"
 
     admin_text = (
-        f"🛒 <b>Новая покупка!</b>\n"
-        f"👤 Пользователь: <code>{user_id}</code>\n"
+        f"🛒 **Новая покупка!**\n"
+        f"👤 Пользователь: `{user_id}`\n"
         f"🌍 Страна: {cart['country_name']}\n"
         f"📱 Тип: {type_label}\n"
         f"💰 Сумма: {int(price)}₽\n"
@@ -590,23 +586,23 @@ async def _do_buy(callback: CallbackQuery, insured: bool):
     await notify_admin_purchase(callback.bot, admin_text)
 
     result_text = (
-        f"✅ <b>Покупка успешна!</b>\n\n"
+        f"✅ **Покупка успешна!**\n\n"
         f"Страна: {cart['country_name']}\n"
         f"Тип: {type_label}\n"
         f"Цена: {int(price)}₽\n"
         f"{guarantee_text}\n\n"
         f"📦 Данные аккаунта:\n"
-        f"<code>{account_data}</code>\n\n"
+        f" `{account_data}`\n\n"
         f"💾 Сохраните их — они больше не будут показаны."
     )
     await safe_edit(callback, result_text, reply_markup=post_purchase_kb)
     set_user_cooldown(user_id, USER_BUY_COOLDOWN)
 
-
+# ========== ИСПРАВЛЕННАЯ buy_lzt (опт) ==========
 @router.callback_query(F.data.startswith("buy_lzt:"))
 async def buy_lzt(callback: CallbackQuery):
     if is_purchases_paused():
-        await safe_answer(callback, 
+        await safe_answer(callback,
             "🛑 Покупки временно приостановлены.\n"
             "Ведутся технические работы. Попробуйте позже.",
             show_alert=True
@@ -641,12 +637,11 @@ async def buy_lzt(callback: CallbackQuery):
         )
         return
 
-    # Цена за штуку с учётом скидки за количество
     price_per = round(cart["base_price"] * (1 - discount_percent(qty)), 2)
 
     await safe_answer(callback, f"⏳ Покупаем {qty} аккаунт(ов)...")
-    await safe_edit(callback, 
-        "⏳ <b>Покупка аккаунтов...</b>\n" + progress_kb(1).inline_keyboard[0][0].text,
+    await safe_edit(callback,
+        "⏳ **Покупка аккаунтов...**\n" + progress_kb(1).inline_keyboard[0][0].text,
         reply_markup=progress_kb(1)
     )
 
@@ -660,8 +655,8 @@ async def buy_lzt(callback: CallbackQuery):
 
     estimated_cost = sum(cart["items"][i]["price"] for i in range(min(qty, len(cart["items"]))))
     if lzt_balance < estimated_cost:
-        await safe_edit(callback, 
-            "⚠️ <b>Сервис временно недоступен</b>\n"
+        await safe_edit(callback,
+            "⚠️ **Сервис временно недоступен**\n"
             "Попробуйте позже или обратитесь в поддержку.",
             reply_markup=back_to_main_kb
         )
@@ -687,40 +682,40 @@ async def buy_lzt(callback: CallbackQuery):
         lzt_price = item["price"]
         used_item_ids.add(item_id)
 
-        # Блокируем лот, чтобы его не купил другой пользователь параллельно
+        # Блокируем лот
         if not acquire_item_lock(item_id, user_id):
             failed += 1
             continue
 
+        # 1. Fast buy
         buy_result = await fast_buy(item_id)
         if buy_result.get("error") or not buy_result.get("status"):
             release_item_lock(item_id)
             failed += 1
             continue
 
-        data_result = await get_account_data_lzt(item_id)
-        if data_result.get("error"):
-            await cancel_buy(item_id)
-            release_item_lock(item_id)
-            failed += 1
-            continue
+        # 2. Получение данных (secure) — НЕ делаем cancel при ошибке!
+        data_result = await get_item_secure_data(item_id)
 
-        login = data_result.get("login", "N/A")
-        password = data_result.get("password", "N/A")
-        session = data_result.get("session", "N/A")
+        login = data_result.get("login", "")
+        password = data_result.get("password", "")
+        session = data_result.get("session", "")
         has_2fa = data_result.get("2fa", False)
 
-        if login == "N/A" or not session or session == "N/A":
-            await cancel_buy(item_id)
+        if data_result.get("error") or not login or not session:
+            # КРИТИЧЕСКАЯ ОШИБКА: товар куплен (paid), но данных нет
+            # НЕ делаем cancel — это невозможно в статусе paid
             release_item_lock(item_id)
             failed += 1
-            continue
-
-        confirm_result = await confirm_buy(item_id)
-        if confirm_result.get("error"):
-            await cancel_buy(item_id)
-            release_item_lock(item_id)
-            failed += 1
+            # Сообщаем админу о каждой такой ошибке
+            if ADMIN_CHAT_ID:
+                await callback.bot.send_message(ADMIN_CHAT_ID,
+                    f"🚨 КРИТИЧЕСКАЯ ОШИБКА (опт): данные не получены!\n"
+                    f"Item ID: {item_id}\n"
+                    f"Пользователь: {user_id}\n"
+                    f"Ошибка: {data_result.get('error', 'Нет данных')}\n"
+                    f"⚠️ НЕ делайте cancel — товар в статусе paid!"
+                )
             continue
 
         account_data = (
@@ -731,9 +726,7 @@ async def buy_lzt(callback: CallbackQuery):
         if has_2fa:
             account_data += "\n⚠️ На аккаунте включен 2FA"
 
-        # FIX: атомарная транзакция — списывает баланс, создаёт аккаунт и покупку.
-        # Раньше здесь были add_account/update_account_status/add_purchase,
-        # которые НЕ списывали баланс — аккаунты уходили бесплатно.
+        # 3. Атомарная транзакция — списывает баланс, создаёт аккаунт и покупку
         tx = purchase_account_tx(
             user_id=user_id,
             account_id=0,
@@ -752,17 +745,24 @@ async def buy_lzt(callback: CallbackQuery):
             is_insured=False,
         )
         if not tx["ok"]:
-            await cancel_buy(item_id)
+            # Ошибка БД — товар куплен на LZT, но внутренний баланс не списан
             release_item_lock(item_id)
             failed += 1
+            if ADMIN_CHAT_ID:
+                await callback.bot.send_message(ADMIN_CHAT_ID,
+                    f"🚨 Ошибка БД (опт): {tx.get('error')}\n"
+                    f"Item ID: {item_id}\n"
+                    f"Пользователь: {user_id}"
+                )
             continue
 
         purchased_accounts.append(account_data)
         total_lzt_cost += lzt_price
+        release_item_lock(item_id)
 
     if not purchased_accounts:
-        await safe_edit(callback, 
-            "❌ <b>Покупка не удалась</b>\n"
+        await safe_edit(callback,
+            "❌ **Покупка не удалась**\n"
             "Не удалось выкупить аккаунты.\n"
             "Возможно, их уже купили другие. Попробуйте позже.",
             reply_markup=back_to_main_kb
@@ -771,7 +771,6 @@ async def buy_lzt(callback: CallbackQuery):
         return
 
     successful_qty = len(purchased_accounts)
-    # Фактически списано через purchase_account_tx: price_per × successful_qty
     actual_total = round(price_per * successful_qty, 2)
 
     set_user_cooldown(user_id, USER_BUY_COOLDOWN)
@@ -779,8 +778,8 @@ async def buy_lzt(callback: CallbackQuery):
 
     type_label = "саморег" if cart["account_type"] == "samoreg" else "авторег"
     admin_text = (
-        f"🛒 <b>Новая покупка!</b>\n"
-        f"👤 Пользователь: <code>{user_id}</code>\n"
+        f"🛒 **Новая покупка!**\n"
+        f"👤 Пользователь: `{user_id}`\n"
         f"🌍 Страна: {cart['country_name']}\n"
         f"📱 Тип: {type_label}\n"
         f"📦 Количество: {successful_qty} шт" + (f" ({failed} не удалось)" if failed else "") + "\n"
@@ -793,7 +792,7 @@ async def buy_lzt(callback: CallbackQuery):
     user_lzt_cart.pop(user_id, None)
 
     result_text = (
-        f"✅ <b>Покупка успешна!</b>" + (f"\n⚠️ {failed} акк. не удалось выкупить" if failed else "") + "\n"
+        f"✅ **Покупка успешна!**" + (f"\n⚠️ {failed} акк. не удалось выкупить" if failed else "") + "\n"
         f"Страна: {cart['country_name']}\n"
         f"Тип: {type_label}\n"
         f"Количество: {successful_qty} шт\n"
@@ -802,12 +801,11 @@ async def buy_lzt(callback: CallbackQuery):
         f"📦 Данные аккаунтов:\n"
     )
     for idx, acc in enumerate(purchased_accounts, 1):
-        result_text += f"<b>Аккаунт {idx}:</b>\n<code>{acc}</code>\n\n"
+        result_text += f" **Аккаунт {idx}:**\n `{acc}`\n\n"
     result_text += "Сохраните их — они больше не будут показаны."
 
     await safe_edit(callback, result_text, reply_markup=post_purchase_kb)
     await safe_answer(callback, )
-
 
 @router.callback_query(F.data.startswith("buy_account:"))
 async def buy_account_handler(callback: CallbackQuery):
@@ -822,16 +820,14 @@ async def buy_account_handler(callback: CallbackQuery):
     user = get_user(user_id)
     if not user or user["balance"] < account["price"]:
         bal = user["balance"] if user else 0
-        await safe_answer(callback, 
+        await safe_answer(callback,
             f"❌ Недостаточно средств. Баланс: {int(bal)}₽, нужно: {int(account['price'])}₽",
             show_alert=True
         )
         return
 
-    # FIX: атомарная транзакция — списывает баланс и помечает аккаунт проданным.
-    # Раньше баланс не списывался (add_purchase + update_account_status).
     tx = purchase_existing_account_tx(user_id, account_id, account["price"],
-                                      guarantee_hours=24, is_insured=False)
+        guarantee_hours=24, is_insured=False)
     if not tx["ok"]:
         error = tx.get("error", "unknown")
         if error == "insufficient_balance":
@@ -847,24 +843,23 @@ async def buy_account_handler(callback: CallbackQuery):
 
     type_label = "саморег" if account["account_type"] == "samoreg" else "авторег"
     await safe_edit(callback,
-        f"✅ <b>Покупка успешна!</b>\n"
+        f"✅ **Покупка успешна!**\n"
         f"Страна: {account['country_name']}\n"
         f"Тип: {type_label}\n"
         f"Цена: {int(account['price'])}₽\n"
         f"🛡 Гарантия: 24 часа\n\n"
         f"📦 Данные аккаунта:\n"
-        f"<code>{account['data']}</code>\n\n"
+        f" `{account['data']}`\n\n"
         f"Сохраните их — они больше не будут показаны.",
         reply_markup=post_purchase_kb
     )
-
 
 # ========== ИЗБРАННОЕ ==========
 @router.callback_query(F.data.startswith("add_fav:"))
 async def add_favorite_handler(callback: CallbackQuery):
     country_code = callback.data.split(":")[1]
     text = (
-        "⭐ <b>Добавить в избранное</b>\n"
+        "⭐ **Добавить в избранное**\n"
         "Выберите тип аккаунта:"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -874,7 +869,6 @@ async def add_favorite_handler(callback: CallbackQuery):
     ])
     await safe_edit(callback, text, reply_markup=kb)
     await safe_answer(callback, )
-
 
 @router.callback_query(F.data.startswith("fav_confirm:"))
 async def fav_confirm(callback: CallbackQuery):
@@ -889,20 +883,19 @@ async def fav_confirm(callback: CallbackQuery):
     type_label = "саморег" if account_type == "samoreg" else "авторег"
 
     await safe_answer(callback, f"✅ {flag} {name} ({type_label}) добавлено в избранное!", show_alert=True)
-    await safe_edit(callback, 
-        f"✅ <b>Добавлено в избранное!</b>\n"
+    await safe_edit(callback,
+        f"✅ **Добавлено в избранное!**\n"
         f"{flag} {name} — {type_label}\n"
         f"Быстрый доступ через 📋 Покупка аккаунта → ⭐ Избранное",
         reply_markup=back_to_main_kb
     )
-
 
 @router.callback_query(F.data == "my_favorites")
 async def my_favorites(callback: CallbackQuery):
     favorites = get_favorites(callback.from_user.id)
     if not favorites:
         text = (
-            "⭐ <b>Избранное</b>\n"
+            "⭐ **Избранное**\n"
             "У вас пока нет избранных позиций.\n"
             "Добавляйте часто покупаемые страны прямо из каталога — "
             "кнопка ⭐ В избранное рядом с выбором типа аккаунта."
@@ -911,10 +904,9 @@ async def my_favorites(callback: CallbackQuery):
         await safe_answer(callback, )
         return
 
-    text = "⭐ <b>Избранное</b>\nНажмите, чтобы быстро перейти к покупке:\n"
+    text = "⭐ **Избранное**\nНажмите, чтобы быстро перейти к покупке:\n"
     await safe_edit(callback, text, reply_markup=favorites_kb(favorites))
     await safe_answer(callback, )
-
 
 @router.callback_query(F.data.startswith("remove_fav:"))
 async def remove_favorite_handler(callback: CallbackQuery):
@@ -925,17 +917,15 @@ async def remove_favorite_handler(callback: CallbackQuery):
     await safe_answer(callback, "✅ Удалено из избранного")
     await my_favorites(callback)
 
-
 @router.callback_query(F.data == "buy_filters")
 async def buy_filters(callback: CallbackQuery):
     user_filters[callback.from_user.id] = {}
     text = (
-        "⚙️ <b>Фильтры поиска</b>\n"
+        "⚙️ **Фильтры поиска**\n"
         "Настройте параметры и нажмите 🧳 Показать."
     )
     await safe_edit(callback, text, reply_markup=filters_kb)
     await safe_answer(callback, )
-
 
 @router.callback_query(F.data == "apply_filters")
 async def apply_filters(callback: CallbackQuery):
@@ -947,14 +937,14 @@ async def apply_filters(callback: CallbackQuery):
     conn.close()
 
     if not rows:
-        await safe_edit(callback, 
+        await safe_edit(callback,
             "❌ По вашему запросу ничего не найдено.",
             reply_markup=back_to_buy_kb
         )
         await safe_answer(callback, )
         return
 
-    text = "🧳 <b>Результаты поиска:</b>\n"
+    text = "🧳 **Результаты поиска:**\n"
     for row in rows:
         row = dict(row)
         type_label = "саморег" if row["account_type"] == "samoreg" else "авторег"
@@ -963,28 +953,24 @@ async def apply_filters(callback: CallbackQuery):
     await safe_edit(callback, text, reply_markup=back_to_buy_kb)
     await safe_answer(callback, )
 
-
 @router.callback_query(F.data == "reset_filters")
 async def reset_filters(callback: CallbackQuery):
     user_filters[callback.from_user.id] = {}
     await safe_answer(callback, "✅ Фильтры сброшены")
     await buy_filters(callback)
 
-
 @router.callback_query(F.data == "bulk_order")
 async def bulk_order(callback: CallbackQuery):
     await safe_answer(callback, "🛠 Оптовые заказы в разработке", show_alert=True)
-
 
 @router.callback_query(F.data == "search_country")
 async def search_country(callback: CallbackQuery, state: FSMContext):
     await state.set_state(SearchState.waiting_country)
     await callback.message.answer(
-        "🔍 <b>Поиск страны</b>\n"
-        "Введите название страны (например: <i>Франция</i> или <i>US</i>):"
+        "🔍 **Поиск страны**\n"
+        "Введите название страны (например: _Франция_ или _US_):"
     )
     await safe_answer(callback, )
-
 
 @router.message(SearchState.waiting_country, F.text)
 async def handle_search_country(message: Message, state: FSMContext):
@@ -1006,16 +992,15 @@ async def handle_search_country(message: Message, state: FSMContext):
     if len(results) == 1:
         code, name, flag = results[0]
         text = (
-            f"{flag} <b>{name}</b>\n"
+            f"{flag} **{name}**\n"
             "Выберите тип аккаунта:\n"
-            "• 🧑 <b>Саморег (физ)</b>\n"
-            "• 🤖 <b>Авторег (вирт)</b>"
+            "• 🧑 **Саморег (физ)**\n"
+            "• 🤖 **Авторег (вирт)**"
         )
         await message.answer(text, reply_markup=country_type_kb(code))
         return
 
-    text = "🔍 <b>Найдено несколько стран:</b>\n"
-    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    text = "🔍 **Найдено несколько стран:**\n"
     kb_buttons = []
     for code, name, flag in results:
         kb_buttons.append([InlineKeyboardButton(text=f"{flag} {name}", callback_data=f"select_country:{code}")])
@@ -1024,23 +1009,20 @@ async def handle_search_country(message: Message, state: FSMContext):
 
     await message.answer(text, reply_markup=kb)
 
-
 @router.callback_query(F.data == "main_menu")
 async def main_menu(callback: CallbackQuery):
     from keyboards import main_menu_kb
     text = (
-        f"👋 Привет, <b>{callback.from_user.full_name}</b>!\n"
+        f"👋 Привет, **{callback.from_user.full_name}**!\n"
         "Добро пожаловать в магазин Telegram-аккаунтов.\n"
         "Выбирай нужный раздел ниже 👇"
     )
     await safe_edit(callback, text, reply_markup=main_menu_kb)
     await safe_answer(callback, )
 
-
 @router.callback_query(F.data == "noop")
 async def noop(callback: CallbackQuery):
     await safe_answer(callback, )
-
 
 def _filter_by_type(items, account_type):
     if not account_type or not items:
@@ -1064,11 +1046,9 @@ def _filter_by_type(items, account_type):
         origin = (item.get("origin") or "").lower()
         resale_origin = (item.get("resale_origin") or "").lower()
 
-        # Фишинг и стиллер исключены всегда (включая перепроданные лоты)
         if origin in ("phishing", "stealer") or resale_origin in ("phishing", "stealer"):
             continue
 
-        # Точное совпадение по происхождению из API (самый надёжный признак)
         if origin:
             if account_type == "autoreg" and origin == "autoreg":
                 explicit_match.append(item)
