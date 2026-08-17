@@ -1,0 +1,24 @@
+version: "3.8"
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+    restart: unless-stopped
+
+  bot:
+    build: .
+    env_file: .env
+    environment:
+      # Внутри docker-сети Redis доступен по имени сервиса, а не localhost.
+      # Переопределяем значение из .env (redis://localhost:6379/0),
+      # иначе бот получает "Timeout connecting to server".
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - redis
+    volumes:
+      - ./backups:/app/backups
+      - ./.env:/app/.env:ro
+      - ./shop.db:/app/shop.db
+    restart: unless-stopped
