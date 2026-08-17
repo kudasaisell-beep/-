@@ -1,0 +1,3 @@
+-- Initial schema (run by database.py init_db)
+-- This file is for documentation/backup purposes.
+-- Use `python database.py` to create tables.
