@@ -17,6 +17,20 @@ _last_search_ts = 0.0
 SEARCH_MIN_INTERVAL = 3.0
 BLOCKED_ORIGINS = ("phishing", "stealer")
 
+_session: aiohttp.ClientSession | None = None
+
+async def get_session() -> aiohttp.ClientSession:
+    global _session
+    if _session is None or _session.closed:
+        _session = aiohttp.ClientSession()
+    return _session
+
+async def close_session():
+    global _session
+    if _session and not _session.closed:
+        await _session.close()
+        _session = None
+
 async def lzt_request(endpoint: str, method="GET", params=None, json_data=None):
     async with _lzt_semaphore:
         async with _lzt_lock:
@@ -29,46 +43,60 @@ async def lzt_request(endpoint: str, method="GET", params=None, json_data=None):
             param_str = "&".join(f"{k}={v}" for k, v in (params or {}).items())
         full_url = f"{url}?{param_str}" if param_str else url
         logger.info(f"LZT REQUEST: {method} {full_url}")
+
+        session = await get_session()
         last_exception = None
-        for attempt in range(3):
-            async with aiohttp.ClientSession() as session:
-                try:
-                    timeout = aiohttp.ClientTimeout(total=15 if method == "GET" else 60)
-                    if method == "GET":
-                        async with session.get(url, headers=headers, params=params, timeout=timeout) as resp:
-                            text = await resp.text()
-                            try:
-                                data = __import__("json").loads(text)
-                            except Exception:
-                                data = {"error": "Invalid JSON", "raw": text[:500]}
-                            data["_http_status"] = resp.status
-                            if resp.status == 401:
-                                data["_token_expired"] = True
-                            return data
-                    elif method == "POST":
-                        async with session.post(url, headers=headers, json=json_data, params=params, timeout=timeout) as resp:
-                            text = await resp.text()
-                            try:
-                                data = __import__("json").loads(text)
-                            except Exception:
-                                data = {"error": "Invalid JSON", "raw": text[:500]}
-                            data["_http_status"] = resp.status
-                            if resp.status == 401:
-                                data["_token_expired"] = True
-                            return data
-                    elif method == "PUT":
-                        async with session.put(url, headers=headers, json=json_data, timeout=timeout) as resp:
-                            text = await resp.text()
-                            try:
-                                data = __import__("json").loads(text)
-                            except Exception:
-                                data = {"error": "Invalid JSON", "raw": text[:500]}
-                            data["_http_status"] = resp.status
-                            return data
-                except Exception as e:
-                    logger.error(f"LZT API exception (attempt {attempt+1}/3): {e}")
-                    last_exception = e
-                    await asyncio.sleep(1 * (attempt + 1))
+        for attempt in range(5):
+            try:
+                timeout = aiohttp.ClientTimeout(total=15 if method == "GET" else 60)
+                if method == "GET":
+                    async with session.get(url, headers=headers, params=params, timeout=timeout) as resp:
+                        text = await resp.text()
+                        try:
+                            data = __import__("json").loads(text)
+                        except Exception:
+                            data = {"error": "Invalid JSON", "raw": text[:500]}
+                        data["_http_status"] = resp.status
+                        if resp.status == 401:
+                            data["_token_expired"] = True
+                        if 500 <= resp.status < 600:
+                            raise aiohttp.ClientResponseError(
+                                resp.request_info, resp.history, status=resp.status
+                            )
+                        return data
+                elif method == "POST":
+                    async with session.post(url, headers=headers, json=json_data, params=params, timeout=timeout) as resp:
+                        text = await resp.text()
+                        try:
+                            data = __import__("json").loads(text)
+                        except Exception:
+                            data = {"error": "Invalid JSON", "raw": text[:500]}
+                        data["_http_status"] = resp.status
+                        if resp.status == 401:
+                            data["_token_expired"] = True
+                        if 500 <= resp.status < 600:
+                            raise aiohttp.ClientResponseError(
+                                resp.request_info, resp.history, status=resp.status
+                            )
+                        return data
+                elif method == "PUT":
+                    async with session.put(url, headers=headers, json=json_data, timeout=timeout) as resp:
+                        text = await resp.text()
+                        try:
+                            data = __import__("json").loads(text)
+                        except Exception:
+                            data = {"error": "Invalid JSON", "raw": text[:500]}
+                        data["_http_status"] = resp.status
+                        if 500 <= resp.status < 600:
+                            raise aiohttp.ClientResponseError(
+                                resp.request_info, resp.history, status=resp.status
+                            )
+                        return data
+            except (aiohttp.ClientResponseError, aiohttp.ClientError, asyncio.TimeoutError) as e:
+                logger.warning(f"LZT API attempt {attempt+1}/5 failed: {e}")
+                last_exception = e
+                wait = min(2 ** attempt, 30)
+                await asyncio.sleep(wait)
         return {"error": str(last_exception), "_http_status": 0}
 
 def _extract_items(data):
@@ -124,11 +152,11 @@ def _normalize_item(item):
             item_age_days = None
     if item_age_days is None:
         item_age_days = telegram_data.get("account_age") or telegram_data.get("age") or telegram_data.get("days")
-        if item_age_days is not None:
-            try:
-                item_age_days = int(item_age_days)
-            except (ValueError, TypeError):
-                item_age_days = None
+    if item_age_days is not None:
+        try:
+            item_age_days = int(item_age_days)
+        except (ValueError, TypeError):
+            item_age_days = None
     if reg_date is None:
         reg_date = telegram_data.get("registration_date") or telegram_data.get("reg_date") or telegram_data.get("created")
     has_avatar = bool(telegram_data.get("avatar", False))
@@ -186,9 +214,33 @@ async def get_lzt_balance():
     return data
 
 async def cancel_buy(item_id: int):
-    """ОТМЕНА только для статуса reserved (до оплаты). НЕ вызывать после paid!"""
     endpoint = f"/{item_id}/cancel"
     return await lzt_request(endpoint, method="POST")
+
+async def reserve_item(item_id: int, price: int = None):
+    endpoint = f"/{item_id}/reserve"
+    if price:
+        return await lzt_request(endpoint, method="POST", json_data={"price": price})
+    return await lzt_request(endpoint, method="POST")
+
+async def confirm_buy(item_id: int, price: int = None):
+    endpoint = f"/{item_id}/confirm-buy"
+    if price:
+        return await lzt_request(endpoint, method="POST", json_data={"price": price})
+    return await lzt_request(endpoint, method="POST")
+
+# FIX 23: verify purchase actually succeeded
+async def verify_purchase(item_id: int) -> dict:
+    """Проверяем, что лот действительно куплен (статус sold/closed)."""
+    endpoint = f"/{item_id}"
+    data = await lzt_request(endpoint, method="GET")
+    if data.get("error"):
+        return {"ok": False, "error": data["error"]}
+    item = data.get("item", {})
+    status = item.get("status", "").lower()
+    if status in ("sold", "closed", "reserved"):
+        return {"ok": True, "status": status}
+    return {"ok": False, "status": status, "error": f"unexpected_status_{status}"}
 
 async def search_telegram_accounts(country: str = None, account_type: str = None):
     params = [
@@ -243,12 +295,6 @@ async def fast_buy(item_id: int, price: int = None):
         return await lzt_request(endpoint, method="POST", json_data={"price": price})
     return await lzt_request(endpoint, method="POST")
 
-async def confirm_buy(item_id: int, price: int = None):
-    endpoint = f"/{item_id}/confirm-buy"
-    if price:
-        return await lzt_request(endpoint, method="POST", json_data={"price": price})
-    return await lzt_request(endpoint, method="POST")
-
 async def get_account_data_lzt(item_id: int):
     endpoint = f"/{item_id}/check-account"
     data = await lzt_request(endpoint, method="POST")
@@ -260,9 +306,7 @@ async def get_account_data_lzt(item_id: int):
         data["session"] = login_data.get("raw") or ""
     return data
 
-# FIX: добавлен get_item_secure_data
 async def get_item_secure_data(item_id: int):
-    """Получение защищённых данных после покупки (paid). Fallback на check-account."""
     endpoint = f"/{item_id}/get-secure-data"
     data = await lzt_request(endpoint, method="POST")
     if isinstance(data, dict) and isinstance(data.get("item"), dict):
@@ -282,22 +326,22 @@ async def validate_account_lzt(item_id: int):
     endpoint = f"/{item_id}/check-account"
     return await lzt_request(endpoint, method="POST")
 
+# FIX 25: demo_search uses negative IDs to avoid collision with real LZT IDs
+_demo_counter = 0
+
 def demo_search(country_code: str, account_type: str):
+    global _demo_counter
     country_names = {
         "US": "США", "KZ": "Казахстан", "IN": "Индия", "ID": "Индонезия",
         "PH": "Филиппины", "VN": "Вьетнам", "BR": "Бразилия", "AR": "Аргентина",
         "TR": "Турция", "RO": "Румыния", "PL": "Польша", "DE": "Германия",
-        "GB": "Великобритания", "IT": "Италия", "ES": "Испания", "FR": "Франция",
-        "NL": "Нидерланды", "CZ": "Чехия", "BG": "Болгария", "MX": "Мексика",
-        "CL": "Чили", "PE": "Перу", "CO": "Колумбия", "TH": "Таиланд",
-        "MY": "Малайзия", "PK": "Пакистан", "BD": "Бангладеш", "EG": "Египет",
-        "MA": "Марокко", "NG": "Нигерия", "KE": "Кения", "ZA": "ЮАР",
     }
     name = country_names.get(country_code, country_code)
     base_price = random.randint(30, 120)
     age = random.randint(10, 365)
+    _demo_counter += 1
     return [{
-        "item_id": random.randint(100000, 999999),
+        "item_id": -(_demo_counter),  # negative ID, never collides with real LZT
         "title": f"Telegram {account_type} {name}",
         "price": base_price,
         "country": country_code,

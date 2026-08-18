@@ -1,7 +1,6 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from database import get_min_price
 
-# MAIN MENU
 main_menu_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="📋 Покупка аккаунта", callback_data="buy_menu")],
     [InlineKeyboardButton(text="👤 Личный кабинет", callback_data="profile")],
@@ -9,7 +8,6 @@ main_menu_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="📜 Документы", callback_data="legal_menu")],
 ])
 
-# LEGAL (документы)
 legal_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="🔐 Политика конфиденциальности", callback_data="privacy_policy")],
     [InlineKeyboardButton(text="📄 Пользовательское соглашение", callback_data="terms_of_service")],
@@ -21,7 +19,6 @@ legal_back_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="◀️ Главное меню", callback_data="main_menu")],
 ])
 
-# BACK BUTTONS
 back_to_main_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="◀️ Главное меню", callback_data="main_menu")],
 ])
@@ -46,7 +43,6 @@ back_to_profile_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="◀️ Назад в личный кабинет", callback_data="profile")],
 ])
 
-# SUPPORT MENU
 support_menu_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="❓ FAQ", callback_data="faq")],
     [InlineKeyboardButton(text="📦 Как купить?", callback_data="faq_how_to_buy")],
@@ -65,7 +61,6 @@ faq_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="◀️ Назад в поддержку", callback_data="support_menu")],
 ])
 
-# TICKET TYPES
 ticket_type_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="🛍 Вопрос по покупке", callback_data="ticket_type:purchase")],
     [InlineKeyboardButton(text="💰 Вопрос по пополнению", callback_data="ticket_type:payment")],
@@ -74,7 +69,6 @@ ticket_type_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="◀️ Назад в поддержку", callback_data="support_menu")],
 ])
 
-# BUY MENU
 buy_main_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="🌍 Все страны", callback_data="view_countries")],
     [InlineKeyboardButton(text="🔍 Поиск страны", callback_data="search_country")],
@@ -85,14 +79,12 @@ buy_main_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="◀️ Главное меню", callback_data="main_menu")],
 ])
 
-# INSURANCE
 insurance_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="🛡 Застраховать (+20%) — пожизненная гарантия", callback_data="buy_insured")],
     [InlineKeyboardButton(text="✅ Без страховки — 24ч гарантия", callback_data="buy_no_insurance")],
     [InlineKeyboardButton(text="◀️ Назад", callback_data="buy_menu")],
 ])
 
-# COUNTRY TYPE SELECTION
 def country_type_kb(country_code: str):
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -103,7 +95,6 @@ def country_type_kb(country_code: str):
         [InlineKeyboardButton(text="◀️ Назад к странам", callback_data="view_countries")],
     ])
 
-# ACCOUNT CARD (beautiful)
 def account_card_kb(item_id: int, price: float, country_code: str, account_type: str):
     type_label = "🧑 Саморег" if account_type == "samoreg" else "🤖 Авторег"
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -112,7 +103,6 @@ def account_card_kb(item_id: int, price: float, country_code: str, account_type:
         [InlineKeyboardButton(text="◀️ Назад", callback_data=f"select_country:{country_code}")],
     ])
 
-# CART (выбор количества)
 def lzt_cart_kb(country_code: str, account_type: str, qty: int, available: int, total_price: float):
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -125,7 +115,6 @@ def lzt_cart_kb(country_code: str, account_type: str, qty: int, available: int, 
         [InlineKeyboardButton(text="◀️ Назад к странам", callback_data="view_countries")],
     ])
 
-# PROFILE
 profile_kb = InlineKeyboardMarkup(inline_keyboard=[
     [
         InlineKeyboardButton(text="💰 Пополнить", callback_data="top_up"),
@@ -138,7 +127,6 @@ profile_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="◀️ Главное меню", callback_data="main_menu")],
 ])
 
-# BALANCE
 balance_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="💳 СБП", callback_data="pay_sbp")],
     [InlineKeyboardButton(text="📱 QR СБП", callback_data="pay_qr")],
@@ -156,7 +144,6 @@ stars_amount_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="◀️ Назад", callback_data="top_up")],
 ])
 
-# CART
 def cart_kb(items):
     buttons = []
     for item in items:
@@ -171,7 +158,6 @@ def cart_kb(items):
     buttons.append([InlineKeyboardButton(text="◀️ Главное меню", callback_data="main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# REVIEWS
 reviews_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="✍️ Написать отзыв", callback_data="leave_review")],
     [InlineKeyboardButton(text="◀️ Главное меню", callback_data="main_menu")],
@@ -192,14 +178,12 @@ review_cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="❌ Отмена", callback_data="review_cancel")],
 ])
 
-# POST-PURCHASE (предложение оставить отзыв сразу после покупки)
 post_purchase_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="⭐ Оставить отзыв", callback_data="leave_review")],
     [InlineKeyboardButton(text="🛒 Купить ещё", callback_data="buy_menu")],
     [InlineKeyboardButton(text="◀️ Главное меню", callback_data="main_menu")],
 ])
 
-# ADMIN
 def admin_kb(user_id: int, admin_ids: list):
     if user_id not in admin_ids:
         return None
@@ -217,7 +201,6 @@ def admin_price_type_kb(country_code: str, price: float):
         [InlineKeyboardButton(text="🌐 Оба типа", callback_data=f"admin_set_price:{country_code}:both:{price}")],
     ])
 
-# ADMIN TICKETS
 def admin_ticket_kb(ticket_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -227,7 +210,6 @@ def admin_ticket_kb(ticket_id: int):
         [InlineKeyboardButton(text="⏳ В ожидании", callback_data=f"admin_wait_ticket:{ticket_id}")],
     ])
 
-# FILTERS
 filters_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="🔄 Тип: дешёвые / все", callback_data="filter_type")],
     [InlineKeyboardButton(text="📞 Страна: любая / выбор", callback_data="filter_country")],
@@ -242,10 +224,11 @@ filters_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="◀️ Назад", callback_data="buy_menu")],
 ])
 
-# COPY DATA + ACTIONS
+# FIX 13: callback_data не превышает 64 байт — используем purchase_id вместо данных
+# FIX 12: строгая валидация типов в callback data
 def copy_data_kb(account_data: str, purchase_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 Копировать данные", callback_data=f"copy_data:{account_data[:50]}")],
+        [InlineKeyboardButton(text="📋 Копировать данные", callback_data=f"copy_data:{purchase_id}")],
         [InlineKeyboardButton(text="🔑 Запросить код", callback_data=f"request_code:{purchase_id}")],
         [InlineKeyboardButton(text="🔄 Сбросить сессии", callback_data=f"reset_sessions:{purchase_id}")],
         [InlineKeyboardButton(text="✅ Проверить валидность", callback_data=f"validate_acc:{purchase_id}")],
@@ -254,7 +237,6 @@ def copy_data_kb(account_data: str, purchase_id: int):
         [InlineKeyboardButton(text="◀️ Главное меню", callback_data="main_menu")],
     ])
 
-# FAVORITES
 def favorites_kb(favorites):
     buttons = []
     country_names = {
@@ -294,18 +276,16 @@ def favorites_kb(favorites):
     buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="buy_menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# PROGRESS (emoji)
 def progress_kb(step: int, total: int = 4):
     emojis = ["⏳", "✅"]
     steps = ["🔍 Поиск", "🔒 Резерв", "🛡 Проверка", "📦 Выдача"]
-    text = "  ".join(
+    text = " ".join(
         f"{emojis[1 if i < step else 0]} {s}" for i, s in enumerate(steps)
     )
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=text, callback_data="noop")],
     ])
 
-# COUNTRIES (pagination) WITH PRICES
 def countries_kb(page: int = 0):
     countries = [
         ("US", "США", "🇺🇸"), ("KZ", "Казахстан", "🇰🇿"), ("IN", "Индия", "🇮🇳"),
@@ -320,7 +300,6 @@ def countries_kb(page: int = 0):
         ("EG", "Египет", "🇪🇬"), ("MA", "Марокко", "🇲🇦"), ("NG", "Нигерия", "🇳🇬"),
         ("KE", "Кения", "🇰🇪"), ("ZA", "ЮАР", "🇿🇦"),
     ]
-
     per_page = 10
     total_pages = (len(countries) + per_page - 1) // per_page
     start = page * per_page

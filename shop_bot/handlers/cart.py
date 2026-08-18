@@ -1,263 +1,237 @@
 from aiogram import Router, F
-from tg_utils import safe_answer, safe_edit
 from aiogram.types import CallbackQuery
-
+from aiogram.fsm.context import FSMContext
+from tg_utils import safe_answer, safe_edit, send_safe_message
 from database import (
-    get_cart, clear_cart, remove_cart_item, get_user, get_account,
-    purchase_account_tx, purchase_existing_account_tx, add_log
+    get_cart, clear_cart, remove_cart_item, get_user, add_purchase, 
+    update_account_status, add_log, get_account, deduct_balance_only, 
+    refund_balance, create_pending_purchase, finalize_pending_purchase
 )
-from keyboards import cart_kb, back_to_main_kb, progress_kb, post_purchase_kb
-# FIX: убраны cancel_buy, confirm_buy; добавлен get_item_secure_data
-from lzt_api import fast_buy, get_item_secure_data
-from redis_client import is_purchases_paused, acquire_item_lock, release_item_lock
-from config import ADMIN_CHAT_ID, TOPIC_PURCHASES
+from keyboards import cart_kb, back_to_main_kb, back_to_buy_kb
+from config import ADMIN_CHAT_ID, TOPIC_PURCHASES, USER_BUY_COOLDOWN
+from redis_client import is_purchases_paused, set_user_cooldown, is_user_cooldown, check_redis_rate_limit
+from lzt_api import reserve_item, confirm_buy, get_item_secure_data, cancel_buy
+from tg_validator import validate_account
+import asyncio
 
 router = Router()
 
-def _type_label(account_type: str) -> str:
-    return "саморег" if account_type == "samoreg" else "авторег"
+_cart_locks: dict[int, asyncio.Lock] = {}
 
-def _build_cart_text(items) -> str:
-    total = sum(item["price"] or 0 for item in items)
-    text = (
-        f"🛒 **Корзина**\n\n"
-        f"Товаров: **{len(items)}**\n"
-        f"Итого: **{int(total)}₽**\n"
-        f"━━━━━━━━━━━━━━━\n"
-    )
-    for item in items:
-        text += (
-            f"• {item['country_name']} — {_type_label(item.get('account_type') or 'autoreg')} "
-            f"— **{int(item['price'] or 0)}₽**\n"
-        )
-    text += "\nНажмите на товар, чтобы убрать его из корзины."
-    return text
-
-async def _notify_admin(bot, text: str):
-    if ADMIN_CHAT_ID:
-        try:
-            kwargs = {}
-            if TOPIC_PURCHASES:
-                kwargs["message_thread_id"] = TOPIC_PURCHASES
-            await bot.send_message(ADMIN_CHAT_ID, text, parse_mode="HTML", **kwargs)
-        except Exception:
-            pass
+def _get_user_lock(user_id: int) -> asyncio.Lock:
+    if user_id not in _cart_locks:
+        _cart_locks[user_id] = asyncio.Lock()
+    return _cart_locks[user_id]
 
 @router.callback_query(F.data == "cart")
-async def cart_handler(callback: CallbackQuery):
-    items = get_cart(callback.from_user.id)
+async def show_cart(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    items = get_cart(user_id)
     if not items:
-        text = (
-            "🛒 **Корзина**\n\n"
-            "Ваша корзина пуста.\n"
-            "Добавляйте аккаунты кнопкой «🛒 В корзину» в карточке товара."
-        )
-        await safe_edit(callback, text, reply_markup=back_to_main_kb)
-        await safe_answer(callback, )
+        text = "🛒 **Корзина**\nКорзина пуста."
+        await safe_edit(callback, text, reply_markup=back_to_buy_kb)
+        await safe_answer(callback)
         return
+    text = _build_cart_text(items)
+    await safe_edit(callback, text, reply_markup=cart_kb(items))
+    await safe_answer(callback)
 
-    await safe_edit(callback, _build_cart_text(items), reply_markup=cart_kb(items))
-    await safe_answer(callback, )
+def _build_cart_text(items):
+    text = "🛒 **Ваша корзина:**\n"
+    total = 0.0
+    for item in items:
+        text += f"• {item['country_name']} — {int(item['price'])}₽\n"
+        total += float(item["price"])
+    text += f"\n💰 **Итого:** {int(total)}₽"
+    return text
 
 @router.callback_query(F.data.startswith("remove_cart:"))
-async def remove_cart(callback: CallbackQuery):
+async def remove_cart_item_handler(callback: CallbackQuery):
     cart_id = int(callback.data.split(":")[1])
     remove_cart_item(cart_id)
     await safe_answer(callback, "✅ Удалено из корзины")
-    await cart_handler(callback)
+    # FIX 28: recalc and show updated cart
+    items = get_cart(callback.from_user.id)
+    if not items:
+        await safe_edit(callback, "🛒 **Корзина**\nКорзина пуста.", reply_markup=back_to_buy_kb)
+        return
+    text = _build_cart_text(items)
+    await safe_edit(callback, text, reply_markup=cart_kb(items))
 
 @router.callback_query(F.data == "clear_cart")
 async def clear_cart_handler(callback: CallbackQuery):
     clear_cart(callback.from_user.id)
-    await safe_edit(callback,
-        "🗑 **Корзина очищена.**",
-        reply_markup=back_to_main_kb
-    )
-    await safe_answer(callback, )
+    await safe_answer(callback, "✅ Корзина очищена")
+    await safe_edit(callback, "🛒 **Корзина**\nКорзина пуста.", reply_markup=back_to_buy_kb)
 
 @router.callback_query(F.data == "checkout")
 async def checkout(callback: CallbackQuery):
-    """
-    ИСПРАВЛЕНИЕ: убран автоматический cancel_buy после fast_buy.
-    Логика:
-    1. fast_buy — покупка
-    2. get_item_secure_data — получение данных
-    3. Если данные получены → списываем баланс, выдаём пользователю
-    4. Если данные НЕ получены → НЕ списываем баланс, НЕ делаем cancel (товар уже paid),
-       сообщаем админу для ручной выдачи
-    """
     user_id = callback.from_user.id
-    items = get_cart(user_id)
-    if not items:
-        await safe_answer(callback, "❌ Корзина пуста", show_alert=True)
-        return
+    async with _get_user_lock(user_id):
+        items = get_cart(user_id)
+        if not items:
+            await safe_answer(callback, "❌ Корзина пуста", show_alert=True)
+            return
 
-    if is_purchases_paused():
-        await safe_answer(callback,
-            "🛑 Покупки временно приостановлены.\n"
-            "Ведутся технические работы. Попробуйте позже.",
-            show_alert=True
-        )
-        return
+        # FIX 3: deduplicate item_id
+        seen_item_ids = set()
+        unique_items = []
+        for it in items:
+            iid = it.get("item_id")
+            if iid:
+                if iid in seen_item_ids:
+                    continue
+                seen_item_ids.add(iid)
+            unique_items.append(it)
+        items = unique_items
 
-    total = sum(item["price"] or 0 for item in items)
-    user = get_user(user_id)
-    if not user or user["balance"] < total:
-        bal = user["balance"] if user else 0
-        await safe_answer(callback,
-            f"❌ Недостаточно средств. Баланс: {int(bal)}₽, нужно: {int(total)}₽",
-            show_alert=True
-        )
-        return
+        if is_purchases_paused():
+            await safe_answer(callback, "🛑 Покупки приостановлены.", show_alert=True)
+            return
 
-    await safe_answer(callback, "⏳ Оформляем заказ...")
-    await safe_edit(callback,
-        "⏳ **Оформление заказа...**\n" + progress_kb(1).inline_keyboard[0][0].text,
-        reply_markup=progress_kb(1)
-    )
+        user = get_user(user_id)
+        # FIX 28: recalc total after dedup
+        total = sum(float(it["price"]) for it in items)
+        if not user or user["balance"] < total:
+            bal = user["balance"] if user else 0
+            await safe_answer(callback, f"❌ Недостаточно средств. Баланс: {int(bal)}₽", show_alert=True)
+            return
+        if is_user_cooldown(user_id):
+            await safe_answer(callback, f"⏱ Подождите {USER_BUY_COOLDOWN} сек", show_alert=True)
+            return
 
-    purchased = []  # (item, account_data)
-    failed = []     # item
-    spent = 0.0
+        # FIX 31: rate limit
+        rl = check_redis_rate_limit(user_id, "buy", max_count=5, window_seconds=60)
+        if not rl["ok"]:
+            await safe_answer(callback, f"⏱ Слишком много покупок. Подождите {rl['retry_after']} сек.", show_alert=True)
+            return
 
-    for item in items:
-        price = item["price"] or 0
-        account_data = None
+        # Списываем баланс заранее
+        deduct = deduct_balance_only(user_id, total)
+        if not deduct["ok"]:
+            await safe_answer(callback, f"❌ {deduct.get('error')}", show_alert=True)
+            return
 
-        if item.get("item_id"):
-            # Лот из каталога LZT
-            item_id = item["item_id"]
+        purchased = []
+        failed = 0
+        for item in items:
+            item_id = item.get("item_id")
+            price = float(item["price"])
+            cost_price = float(item.get("cost_price", price * 0.5))
+            country_code = item.get("country_code", "")
+            country_name = item.get("country_name", "")
+            account_type = item.get("account_type", "samoreg")
 
-            if not acquire_item_lock(item_id, user_id):
-                failed.append(item)
+            # FIX 24: handle None item_id
+            if item_id is None:
+                account_id = item.get("account_id")
+                if not account_id:
+                    failed += 1
+                    continue
+                account = get_account(account_id)
+                if not account or account["status"] != "available":
+                    failed += 1
+                    continue
+                update_account_status(account_id, "sold")
+                add_purchase(user_id, account_id, price, guarantee_hours=24, is_insured=False)
+                add_log(user_id, "buy_cart", f"account_id={account_id}, price={price}")
+                purchased.append(account)
                 continue
 
-            # 1. Fast buy
-            buy_result = await fast_buy(item_id)
-            if buy_result.get("error") or not buy_result.get("status"):
-                release_item_lock(item_id)
-                failed.append(item)
+            # LZT покупка
+            reserve = await reserve_item(item_id)
+            if reserve.get("error") or not reserve.get("status"):
+                failed += 1
                 continue
 
-            # 2. Получение данных (secure) — НЕ делаем cancel при ошибке!
             data_result = await get_item_secure_data(item_id)
-
             login = data_result.get("login", "")
             password = data_result.get("password", "")
             session = data_result.get("session", "")
             has_2fa = data_result.get("2fa", False)
 
             if data_result.get("error") or not login or not session:
-                # КРИТИЧЕСКАЯ ОШИБКА: товар куплен (paid), но данных нет
-                # НЕ делаем cancel — это невозможно в статусе paid
-                release_item_lock(item_id)
-                failed.append(item)
-                # Сообщаем админу
-                if ADMIN_CHAT_ID:
-                    await callback.bot.send_message(ADMIN_CHAT_ID,
-                        f"🚨 КРИТИЧЕСКАЯ ОШИБКА (корзина): данные не получены!\n"
-                        f"Item ID: {item_id}\n"
-                        f"Пользователь: {user_id}\n"
-                        f"Ошибка: {data_result.get('error', 'Нет данных')}\n"
-                        f"⚠️ НЕ делайте cancel — товар в статусе paid!"
-                    )
+                await cancel_buy(item_id)
+                failed += 1
                 continue
 
-            account_data = (
-                f"Телефон: {login}\n"
-                f"Пароль: {password}\n"
-                f"Сессия: {session}"
-            )
+            validation = await validate_account(session, login)
+            if not validation["ok"]:
+                await cancel_buy(item_id)
+                failed += 1
+                continue
+
+            confirm = await confirm_buy(item_id)
+            if confirm.get("error"):
+                await cancel_buy(item_id)
+                failed += 1
+                continue
+
+            # FIX 23: verify
+            verify = await verify_purchase(item_id)
+            if not verify["ok"]:
+                await cancel_buy(item_id)
+                failed += 1
+                continue
+
+            account_data = f"Телефон: {login}\nПароль: {password}\nСессия: {session}"
             if has_2fa:
                 account_data += "\n⚠️ На аккаунте включен 2FA"
 
-            # 3. Атомарная транзакция — списываем баланс ТОЛЬКО после получения данных
-            tx = purchase_account_tx(
-                user_id=user_id,
-                account_id=0,
-                price=price,
-                cost_price=item.get("cost_price") or 0,
-                account_data=account_data,
-                country_code=item.get("country_code") or "",
-                country_name=item.get("country_name") or "",
-                account_type=item.get("account_type") or "autoreg",
+            pending_id = create_pending_purchase(user_id, item_id, price, cost_price, account_data,
+                                                 country_code, country_name, account_type)
+            tx = finalize_pending_purchase(
+                pending_id, user_id, price, cost_price, account_data,
+                country_code, country_name, account_type,
                 item_age_days=item.get("item_age_days"),
-                has_avatar=bool(item.get("has_avatar")),
+                has_avatar=item.get("has_avatar", False),
                 reg_date=item.get("reg_date"),
                 contacts_count=item.get("contacts_count"),
-                has_premium=bool(item.get("has_premium")),
-                guarantee_hours=24,
-                is_insured=False,
+                has_premium=item.get("has_premium", False)
             )
             if not tx["ok"]:
-                # Ошибка БД — товар куплен на LZT, но внутренний баланс не списан
-                release_item_lock(item_id)
-                failed.append(item)
+                failed += 1
                 if ADMIN_CHAT_ID:
-                    await callback.bot.send_message(ADMIN_CHAT_ID,
-                        f"🚨 Ошибка БД (корзина): {tx.get('error')}\n"
-                        f"Item ID: {item_id}\n"
-                        f"Пользователь: {user_id}"
-                    )
+                    await send_safe_message(callback.bot,
+                        f"🚨 Ошибка БД (корзина): {tx.get('error')}\nItem ID: {item_id}\nUser: {user_id}",
+                        chat_id=ADMIN_CHAT_ID)
                 continue
 
-            release_item_lock(item_id)
+            purchased.append({
+                "country_name": country_name,
+                "price": price,
+                "data": account_data,
+            })
 
-        elif item.get("account_id"):
-            # Позиция из внутренней базы аккаунтов
-            account = get_account(item["account_id"])
-            if not account or account["status"] != "available":
-                failed.append(item)
-                continue
+        clear_cart(user_id)
+        if not purchased:
+            refund_balance(user_id, total)
+            await safe_edit(callback, "❌ **Покупка не удалась**\nНе удалось выкупить ни одного аккаунта.", reply_markup=back_to_main_kb)
+            return
 
-            tx = purchase_existing_account_tx(user_id, item["account_id"], price)
-            if not tx["ok"]:
-                failed.append(item)
-                continue
+        # FIX 28: recalc actual total
+        actual_total = sum(float(p["price"]) for p in purchased)
+        if actual_total < total:
+            refund_balance(user_id, total - actual_total)
 
-            account_data = account["data"]
+        set_user_cooldown(user_id, USER_BUY_COOLDOWN)
+        add_log(user_id, "checkout", f"items={len(purchased)}, total={actual_total}")
 
-        else:
-            failed.append(item)
-            continue
+        if ADMIN_CHAT_ID:
+            text = (
+                f"🛒 **Покупка из корзины!**\n"
+                f"👤 Пользователь: `{user_id}`\n"
+                f"📦 Количество: {len(purchased)} шт" + (f" ({failed} не удалось)" if failed else "") + "\n"
+                f"💰 Сумма: {int(actual_total)}₽"
+            )
+            kwargs = {}
+            if TOPIC_PURCHASES:
+                kwargs["message_thread_id"] = TOPIC_PURCHASES
+            await send_safe_message(callback.bot, text, chat_id=ADMIN_CHAT_ID, **kwargs)
 
-        purchased.append((item, account_data))
-        spent += price
-        remove_cart_item(item["id"])
-
-    if not purchased:
-        await safe_edit(callback,
-            "❌ **Не удалось оформить заказ**\n"
-            "Возможно, товары уже купили другие.\n"
-            "Позиции остались в корзине — попробуйте позже.",
-            reply_markup=back_to_main_kb
-        )
-        await safe_answer(callback, )
-        return
-
-    add_log(user_id, "cart_checkout", f"items={len(purchased)}, total={spent}, failed={len(failed)}")
-
-    admin_text = (
-        f"🛒 **Заказ из корзины!**\n"
-        f"👤 Пользователь: `{user_id}`\n"
-        f"📦 Позиций: {len(purchased)}" + (f" ({len(failed)} не удалось)" if failed else "") + "\n"
-        f"💰 Сумма: {int(spent)}₽"
-    )
-    await _notify_admin(callback.bot, admin_text)
-
-    result_text = (
-        f"✅ **Заказ оформлен!**" + (f"\n⚠️ {len(failed)} позиц. не удалось выкупить — они остались в корзине" if failed else "") + "\n\n"
-        f"📦 Куплено аккаунтов: **{len(purchased)}**\n"
-        f"💰 Списано: **{int(spent)}₽**\n"
-        f"🛡 Гарантия: 24 часа\n\n"
-        f"Данные аккаунтов:\n"
-    )
-    for idx, (item, data) in enumerate(purchased, 1):
-        result_text += (
-            f" **{idx}. {item['country_name']} — {_type_label(item.get('account_type') or 'autoreg')}**\n"
-            f" `{data}`\n\n"
-        )
-    result_text += "💾 Сохраните данные — они больше не будут показаны."
-
-    await safe_edit(callback, result_text, reply_markup=post_purchase_kb)
-    await safe_answer(callback, )
+        result_text = "✅ **Покупка из корзины успешна!**" + (f"\n⚠️ {failed} акк. не удалось" if failed else "") + "\n\n"
+        for idx, p in enumerate(purchased, 1):
+            result_text += f"**{idx}.** {p['country_name']} — {int(p['price'])}₽\n"
+            result_text += f" `{p['data']}`\n\n"
+        result_text += "Сохраните данные — они больше не будут показаны."
+        await safe_edit(callback, result_text, reply_markup=back_to_main_kb)
