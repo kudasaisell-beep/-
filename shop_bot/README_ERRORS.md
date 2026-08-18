@@ -1,122 +1,189 @@
-# Полный аудит ошибок shop_bot
+# 🚀 Shop Bot v2 — Обновление каталога + Пополнение через карту
 
-## 🔴 Критические (деньги / безопасность / потеря данных)
+## Что изменено
 
-| # | Файл | Ошибка | Последствия | Исправлено |
-|---|------|--------|-------------|------------|
-| 1 | `buy.py` | `cancel_buy()` вызывался после `fast_buy()` при любой ошибке | Товар в статусе `paid` нельзя отменить — деньги с LZT списаны, пользователю не выдано | ✅ |
-| 2 | `buy.py` | Баланс проверяется ДО `fast_buy()`, но списывается ПОСЛЕ через `purchase_account_tx()` | Между проверкой и покупкой баланс мог уйти в минус. `purchase_account_tx` откатится, но товар уже куплен на LZT — убыток | ⚠️ Частично (атомарность внутри tx) |
-| 3 | `database.py` | `RETURNING id` в SQLite — не поддерживается в версиях <3.35 | `purchase_account_tx` и `add_account` падают на старых системах | ✅ |
-| 4 | `database.py` | Connection leaks: `conn.close()` вне `finally` | При exception соединение не закрывается, итог — `database is locked` | ✅ |
-| 5 | `database.py` | Нет `PRAGMA journal_mode=WAL` | При конкурентных запросах — `database is locked`, покупки падают | ✅ |
-| 6 | `buy.py` | `user_pending_item` и `user_lzt_cart` — глобальные dict без TTL | Memory leak, переполнение RAM при долгой работе | ⚠️ Нужен Redis |
-| 7 | `buy.py` | Double-click на insurance: `user_pending_item.pop()` для второго клика вернёт None, но `fast_buy` уже сработал | Двойная покупка одного товара или падение | ✅ (добавлена проверка) |
-| 8 | `cart.py` | Частичная очистка корзины: `remove_cart_item` внутри цикла, если цикл падает — часть товаров удалена, часть нет | Потеря данных о корзине | ✅ (перенесено после успеха) |
-| 9 | `lzt_api.py` | Каждый запрос создаёт новый `aiohttp.ClientSession()` | Утечка соединений, исчерпание файловых дескрипторов | ✅ |
-| 10 | `lzt_api.py` | Нет обработки HTTP 429 Too Many Requests | LZT банит IP, все запросы падают | ✅ |
-| 11 | `account_actions.py` | `reset_sessions` и `validate_acc` НЕ выполняют действие, а только шлют админу сообщение | Пользователь думает, что сброс произошёл, но нет | ✅ (добавлена проверка владельца + честное сообщение) |
-| 12 | `account_actions.py` | Нет проверки владельца purchase | Любой пользователь мог запросить чужой аккаунт по ID | ✅ |
-| 13 | `bot.py` | `_check_token` создаёт новый `asyncio.new_event_loop()` в синхронном контексте | Deadlock, конфликт с существующим loop | ✅ |
-| 14 | `bot.py` | `signal_handler` lambda захватывает `sig` по ссылке | Всегда обрабатывает последний сигнал (SIGINT вместо SIGTERM) | ✅ |
-| 15 | `start.py` | `get_db()` используется напрямую без `with` | Connection leak при exception в реферальной логике | ⚠️ |
-
-## 🟠 Высокие (стабильность / надёжность)
-
-| # | Файл | Ошибка | Последствия |
-|---|------|--------|-------------|
-| 16 | — | Нет `Dockerfile` | `docker-compose.yml` ссылается на `build: .`, сборка невозможна |
-| 17 | — | Нет `requirements.txt` | Невозможно установить зависимости |
-| 18 | `database.py` | `BEGIN EXCLUSIVE` блокирует всю БД SQLite | При 2+ одновременных покупках — очередь, таймауты |
-| 19 | `keyboards.py` | `get_min_price()` вызывается для каждой страны при генерации клавиатуры | N+1 запросов, тормоза при открытии каталога |
-| 20 | `tg_utils.py` | `safe_edit` отправляет новое сообщение при невозможности edit | Спам в чат при частых ошибках |
-| 21 | `lzt_api.py` | `params` как list для GET-запросов | `aiohttp` не всегда корректно сериализует list в query string |
-| 22 | `buy.py` | Нет проверки цены от `fast_buy` | LZT может списать другую сумму — убыток или недоплата |
-| 23 | `admin.py` | `!поиск` — `items = await search_telegram_accounts(country=country_code)` без `account_type` | Возвращает оба типа, но `filtered` берёт `price` из `item.get("price")` — может быть string |
-| 24 | `admin.py` | `cmd_test_buy` пишет в реальную БД через `add_account`/`update_account_status` | Засорение БД тестовыми данными |
-| 25 | `config.py` | `print()` при импорте модуля | Если бот запущен как демон — `BrokenPipeError` |
-| 26 | `redis_client.py` | `_redis_down_until` — глобальная переменная | При многопроцессности (не async) — race condition |
-| 27 | `cleanup_logs.py` | `datetime.now()` без timezone | SQLite хранит local time, при смене TZ — некорректная очистка |
-| 28 | `backup.sh` | `cp` без проверки существования `shop.db` | Ошибка cron, если БД перемещена |
-| 29 | `setup.sh` | `ufw` и `certbot` без проверки установки | Падение скрипта на минимальных системах |
-| 30 | `nginx.conf` | `limit_req_zone` внутри `server` | nginx не запустится, директива должна быть в `http` |
-
-## 🟡 Средние (UX / логика)
-
-| # | Файл | Ошибка | Последствия |
-|---|------|--------|-------------|
-| 31 | `keyboards.py` | `progress_kb` — кнопка с `callback_data="noop"` | Пользователь нажимает, видит "loading", ничего не происходит |
-| 32 | `support.py` | FSM `ticket_type` может застрять | Пользователь застревает в состоянии, бот не отвечает |
-| 33 | `balance.py` | `pay_stars_custom` — нет валидации ввода | Можно ввести "abc", бот упадёт или создаст некорректный инвойс |
-| 34 | `reviews.py` | `has_user_reviewed` не проверяет покупку | Можно оставить отзыв без покупки |
-| 35 | `referral.py` | `ref_earnings` начисляется, но нет вывода | Рефералы копят деньги, которые нельзя потратить |
-| 36 | `info.py` | FAQ callback'и — текст может быть >4096 символов | `TelegramBadRequest: message is too long` |
-| 37 | `legal.py` | Жёстко зашитый текст политики | Изменение требует перезапуска бота |
-| 38 | `docker-compose.yml` | `depends_on` не ждёт готовности Redis | Бот стартует раньше Redis, падает с `Connection refused` |
-| 39 | `bot.py` | `monitor_lzt_deals` — `__import__("random")` | Хак, замедляет выполнение |
-| 40 | `buy.py` | `user_filters` — глобальный dict без cleanup | Memory leak |
-
-## 🟢 Низкие (косметика / логи)
-
-| # | Файл | Ошибка |
-|---|------|--------|
-| 41 | `database.py` | `seed_demo_accounts` — `conn.commit()` вне try/except |
-| 42 | `bot.py` | `logging.basicConfig` после импорта sentry_client — ранние ошибки не попадают в Sentry |
-| 43 | `config.py` | `BACKUP_BOT_TOKENS` — токены видны в .env (ок, но стоит упомянуть) |
-| 44 | `test_lzt.py` | `LZT_TOKEN[:20]` при пустом токене — `IndexError` |
-| 45 | `tg_validator.py` | `client.send_message("@SpamBot", "/start")` — может засветить валидную сессию |
+1. **Главное меню**: кнопка "📋 Покупка аккаунта" → "🛒 Покупка"
+2. **Категории товаров**: 💬 Мессенджеры, 🎮 Игры, 🎬 Сервисы
+3. **Подкатегории**: Telegram, TikTok, Discord, Instagram, Twitter, VK, Reddit, Genshin, Minecraft, Steam, Fortnite, Valorant, Roblox, Epic Games, Spotify, Netflix, ChatGPT, Canva, YouTube, iCloud
+4. **Фильтр нелегальных источников**: брут, фишинг, стиллер, hacked, stolen, cracked, checker, combo, database, leak, dump, logs — исключены для ВСЕХ категорий
+5. **Полная информация из LZT**: при покупке выдаётся ВСЁ, что есть в raw-ответе API
+6. **Пополнение через карту**: ввод суммы → карта 2200 7020 7997 0948 → скриншот чека → админу с кнопками Принять/Отклонить
 
 ---
 
-## Что исправлено в этом ZIP
+## 📦 Установка
 
-### database.py
-- ✅ `DBConnection` context manager — гарантированное закрытие соединений
-- ✅ `PRAGMA journal_mode=WAL` — конкурентность без блокировок
-- ✅ `PRAGMA busy_timeout=5000` — автоматическое ожидание при locked
-- ✅ `lastrowid` вместо `RETURNING id` — совместимость со старым SQLite
-- ✅ `get_db_singleton()` — переиспользование соединения в основном потоке
+### Шаг 1: Замените файлы
 
-### lzt_api.py
-- ✅ Глобальная `aiohttp.ClientSession` — переиспользование соединений
-- ✅ Обработка HTTP 429 — retry с `Retry-After` header
-- ✅ Фикс `params` list → dict для корректной сериализации
+```bash
+cp keyboards.py /path/to/shop_bot/
+cp lzt_api.py /path/to/shop_bot/
+cp handlers/buy.py /path/to/shop_bot/handlers/
+cp handlers/balance.py /path/to/shop_bot/handlers/
+cp handlers/admin.py /path/to/shop_bot/handlers/
+cp handlers/start.py /path/to/shop_bot/handlers/
+```
 
-### bot.py
-- ✅ Async проверка токенов — убран `new_event_loop()` deadlock
-- ✅ Исправлен `signal_handler` — lambda баг устранён
-- ✅ Graceful shutdown — закрытие aiohttp session
-- ✅ Убраны `__import__` хаки
+### Шаг 2: Обновите database.py
 
-### account_actions.py
-- ✅ Проверка владельца purchase (`_is_purchase_owner`)
-- ✅ Честные сообщения: автоматический сброс/валидация невозможны без `item_id`
-- ✅ Уведомление админу с контекстом для ручной обработки
+Добавьте в `init_db()` таблицу `deposits` и функции из `database_updates_v2.py`.
 
-### buy.py / cart.py
-- ✅ Убран `cancel_buy` из критического пути
-- ✅ `get_item_secure_data` — получение данных ДО списания баланса
-- ✅ При ошибке получения данных — НЕ списываем баланс, алерт админу
+### Шаг 3: Пересоздайте БД
 
-## Рекомендации
+```bash
+python database.py
+```
 
-1. **Добавьте `item_id` в таблицу `purchases`** — тогда `reset_sessions` и `validate` смогут работать автоматически
-2. **Перейдите на PostgreSQL** — SQLite не выдержит нагрузку >10 покупок/мин
-3. **Добавьте `requirements.txt`**:
-   ```
-   aiogram==3.13.1
-   aiohttp==3.10.10
-   redis==5.0.8
-   python-dotenv==1.0.1
-   sentry-sdk==2.18.0
-   telethon==1.37.0
-   ```
-4. **Добавьте `Dockerfile`**:
-   ```dockerfile
-   FROM python:3.11-slim
-   WORKDIR /app
-   COPY requirements.txt .
-   RUN pip install --no-cache-dir -r requirements.txt
-   COPY . .
-   CMD ["python", "bot.py"]
-   ```
-5. **Добавьте Redis TTL для `user_pending_item`** — замените глобальные dict на Redis hash с TTL 300 сек
+### Шаг 4: Перезапустите бота
+
+```bash
+python bot.py
+```
+
+---
+
+## ⚠️ ОШИБКИ, КОТОРЫЕ МОГУТ ПОМЕШАТЬ ЗАПУСКУ ПРЯМО СЕЙЧАС
+
+### 1. ❌ Отсутствуют функции в database.py
+**Проблема**: `create_pending_purchase`, `finalize_pending_purchase`, `deduct_balance_only`, `refund_balance`, `check_rate_limit`, `create_deposit`, `get_deposit`, `update_deposit_status`
+
+**Решение**: Проверьте, что эти функции реально существуют в вашем `database.py`. В оригинальном репозитории они используются в `buy.py`, но их реализация может отсутствовать или отличаться.
+
+**Как проверить**:
+```bash
+grep -n "def create_pending_purchase" database.py
+grep -n "def finalize_pending_purchase" database.py
+grep -n "def deduct_balance_only" database.py
+grep -n "def refund_balance" database.py
+```
+
+### 2. ❌ Отсутствует `tg_validator`
+**Проблема**: `from tg_validator import validate_account` — если этого файла нет, бот упадёт при покупке Telegram-аккаунтов.
+
+**Решение**: Создайте заглушку:
+```python
+# tg_validator.py
+async def validate_account(session, login):
+    return {"ok": True}
+```
+
+### 3. ❌ Отсутствует `tg_utils`
+**Проблема**: `safe_answer`, `safe_edit`, `send_safe_message` импортируются из `tg_utils.py`.
+
+**Решение**: Убедитесь, что `tg_utils.py` существует и содержит эти функции.
+
+### 4. ❌ Redis не запущен
+**Проблема**: `redis_client.py` используется для блокировок (`acquire_item_lock`, `set_user_cooldown`). Если Redis недоступен — покупки упадут.
+
+**Решение**: Запустите Redis или создайте заглушки в `redis_client.py`:
+```python
+def acquire_item_lock(item_id, user_id): return True
+def release_item_lock(item_id): pass
+def set_user_cooldown(user_id, seconds): pass
+def is_user_cooldown(user_id): return False
+def check_redis_rate_limit(*args, **kwargs): return {"ok": True}
+def is_purchases_paused(): return False
+```
+
+### 5. ❌ LZT API endpoints для других категорий
+**Проблема**: `/tiktok`, `/discord`, `/genshin-impact` и т.д. могут не существовать на LZT или иметь другие пути.
+
+**Решение**: Проверьте реальные endpoints в документации LZT API. В `lzt_api.py` в словаре `CATEGORY_ENDPOINTS` укажите правильные пути.
+
+### 6. ❌ Нет прав на отправку фото в ADMIN_CHAT_ID
+**Проблема**: При пополнении через карту бот пытается отправить фото (чек) в админ-чат. Если бот не состоит в группе или не имеет прав — упадёт.
+
+**Решение**: Убедитесь, что `ADMIN_CHAT_ID` — это ID супергруппы, бот является админом и может отправлять фото.
+
+### 7. ❌ FSM Storage (Redis) не настроен
+**Проблема**: Новые состояния `CardDepositState` требуют FSM storage. Если Redis недоступен — состояния не будут работать.
+
+**Решение**: В `bot.py` должен быть `RedisStorage.from_url(REDIS_URL)`.
+
+### 8. ❌ Коллизия callback_data
+**Проблема**: Новые callback_data могут конфликтовать со старыми хендлерами, если какие-то роутеры подключены дважды.
+
+**Решение**: Убедитесь, что в `bot.py` нет дублирования `dp.include_router()`.
+
+### 9. ❌ Неправильный ADMIN_CHAT_ID
+**Проблема**: Если `ADMIN_CHAT_ID` не задан или задан как ID пользователя (а не группы), пересылка чеков не сработает.
+
+**Решение**: `ADMIN_CHAT_ID` должен быть ID супергруппы (начинается с `-100`).
+
+### 10. ❌ Отсутствуют колонки в таблице favorites
+**Проблема**: Новый код использует `fav.get("subcat_key")`, но в оригинальной БД этой колонки нет.
+
+**Решение**: Добавьте миграцию:
+```sql
+ALTER TABLE favorites ADD COLUMN subcat_key TEXT DEFAULT 'telegram';
+```
+
+### 11. ❌ Callback data > 64 байт
+**Проблема**: Telegram ограничивает callback_data 64 байтами. Некоторые новые callback_data могут превышать лимит.
+
+**Решение**: Проверьте длину всех callback_data. Например, `admin_deposit_accept:123:456789:1000` — 37 символов, это нормально.
+
+### 12. ❌ Нет обработки `create_pending_purchase` / `finalize_pending_purchase`
+**Проблема**: Если в вашей БД нет таблицы для pending_purchases — код упадёт.
+
+**Решение**: Добавьте таблицу:
+```sql
+CREATE TABLE IF NOT EXISTS pending_purchases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    item_id INTEGER,
+    price REAL,
+    cost_price REAL,
+    account_data TEXT,
+    country_code TEXT,
+    country_name TEXT,
+    account_type TEXT,
+    status TEXT DEFAULT 'pending',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+---
+
+## 🔧 Быстрая проверка перед запуском
+
+```bash
+# 1. Проверьте синтаксис
+python -m py_compile bot.py
+python -m py_compile handlers/buy.py
+python -m py_compile handlers/balance.py
+python -m py_compile handlers/admin.py
+python -m py_compile lzt_api.py
+python -m py_compile keyboards.py
+
+# 2. Проверьте токен LZT
+python test_lzt.py
+
+# 3. Проверьте БД
+python -c "from database import init_db; init_db(); print('OK')"
+
+# 4. Проверьте Redis
+python -c "from redis_client import is_purchases_paused; print('Redis OK')"
+```
+
+---
+
+## 🎮 Админ-команды (остались без изменений)
+
+| Команда | Описание |
+|---------|----------|
+| `!статистика [период]` | Статистика магазина |
+| `!цена КОД ЦЕНА` | Установить цену |
+| `!пользователь ID` | Инфо о пользователе |
+| `!тикеты` | Открытые тикеты |
+| `!возвраты` | Ожидающие возвраты |
+
+---
+
+## 💡 Рекомендации
+
+1. **Тестируйте на копии** — перед деплоем на прод протестируйте на тестовом боте
+2. **Бэкап БД** — сделайте бэкап `shop.db` перед миграциями
+3. **Проверьте LZT токен** — убедитесь, что токен имеет доступ ко всем категориям
+4. **Проверьте баланс LZT** — авто-закупка требует средств на балансе
+5. **Мониторьте логи** — первые 24 часа после обновления смотрите логи на ошибки

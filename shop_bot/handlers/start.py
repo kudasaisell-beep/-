@@ -14,13 +14,9 @@ async def cmd_start(message: Message):
         full_name=message.from_user.full_name
     )
     text = (
-        f"👋 Привет, <b>{message.from_user.full_name}</b>!
-"
-        f"Добро пожаловать в магазин Telegram-аккаунтов.
-
-"
-        f"💰 Баланс: <b>{int(user.get('balance', 0))}₽</b>
-"
+        f"👋 Привет, <b>{message.from_user.full_name}</b>!\n"
+        f"Добро пожаловать в мульти-магазин аккаунтов.\n\n"
+        f"💰 Баланс: <b>{int(user.get('balance', 0))}₽</b>\n"
         f"🛍 Покупок: <b>{user.get('total_spent', 0)}</b>"
     )
     await message.answer(text, reply_markup=main_menu_kb)
@@ -29,8 +25,7 @@ async def cmd_start(message: Message):
 async def main_menu_cb(callback: CallbackQuery):
     user = get_or_create_user(callback.from_user.id)
     text = (
-        f"👋 Привет, <b>{callback.from_user.full_name}</b>!
-"
+        f"👋 Привет, <b>{callback.from_user.full_name}</b>!\n"
         f"💰 Баланс: <b>{int(user.get('balance', 0))}₽</b>"
     )
     await safe_edit(callback, text, reply_markup=main_menu_kb)

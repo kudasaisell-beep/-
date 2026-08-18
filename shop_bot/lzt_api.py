@@ -15,7 +15,13 @@ _lzt_lock = asyncio.Lock()
 _search_lock = asyncio.Lock()
 _last_search_ts = 0.0
 SEARCH_MIN_INTERVAL = 3.0
-BLOCKED_ORIGINS = ("phishing", "stealer")
+
+# РАСШИРЕННЫЙ список заблокированных источников (нелегальные)
+BLOCKED_ORIGINS = (
+    "phishing", "stealer", "brute", "brut", "hacked", "stolen", "cracked",
+    "checker", "combo", "database", "leak", "dump", "logs", "log",
+    " stolen", " hacked", " brute", " brut", " cracked",
+)
 
 _session: aiohttp.ClientSession | None = None
 
@@ -114,7 +120,21 @@ def _extract_items(data):
                         return subval
     return []
 
-def _normalize_item(item):
+def _is_blocked_origin(item: dict) -> bool:
+    """Проверяет, не из нелегального источника ли аккаунт."""
+    origin = (item.get("item_origin") or item.get("origin") or "").lower()
+    resale_origin = (item.get("resale_item_origin") or item.get("resale_origin") or "").lower()
+    title = str(item.get("title", "")).lower()
+    description = str(item.get("description", "")).lower()
+    combined = f"{origin} {resale_origin} {title} {description}"
+
+    for blocked in BLOCKED_ORIGINS:
+        if blocked in combined:
+            return True
+    return False
+
+def _normalize_item(item, category: str = "telegram"):
+    """Универсальная нормализация с полным сохранением данных LZT."""
     if not isinstance(item, dict):
         return None
     price_raw = item.get("price") or item.get("rub_price") or item.get("price_value") or item.get("cost") or item.get("amount") or 0
@@ -124,21 +144,30 @@ def _normalize_item(item):
         price = 0
     if price <= 0:
         return None
+
+    # Проверка на нелегальный источник
+    if _is_blocked_origin(item):
+        logger.warning(f"Blocked illegal origin item: {item.get('item_id')} — {item.get('title', '')[:50]}")
+        return None
+
     item_id = item.get("item_id") or item.get("id") or item.get("itemId") or item.get("lot_id")
-    origin = item.get("item_origin") or item.get("origin") or ""
-    resale_origin = item.get("resale_item_origin") or ""
-    country = item.get("telegram_country") or item.get("country") or ""
+    country = item.get("telegram_country") or item.get("country") or item.get("telegram_country_code") or ""
+
+    # Telegram-специфичные данные
     telegram_data = item.get("telegram", {})
     if not isinstance(telegram_data, dict):
         telegram_data = {}
     registration_type = telegram_data.get("registration", "")
     if not registration_type:
+        origin = (item.get("item_origin") or item.get("origin") or "").lower()
         if origin == "autoreg":
             registration_type = "virtual"
         elif origin in ("self_registration", "personal"):
             registration_type = "manual"
+
     has_password = item.get("telegram_password", telegram_data.get("password", 0))
     spam_block = item.get("telegram_spam_block", telegram_data.get("spam_block", ""))
+
     reg_date = None
     item_age_days = None
     birthday = item.get("telegram_birthday")
@@ -159,6 +188,7 @@ def _normalize_item(item):
             item_age_days = None
     if reg_date is None:
         reg_date = telegram_data.get("registration_date") or telegram_data.get("reg_date") or telegram_data.get("created")
+
     has_avatar = bool(telegram_data.get("avatar", False))
     contacts_count = item.get("telegram_contacts_count", telegram_data.get("contacts") or telegram_data.get("contact_count"))
     if contacts_count is not None:
@@ -167,14 +197,18 @@ def _normalize_item(item):
         except (ValueError, TypeError):
             contacts_count = None
     has_premium = bool(item.get("telegram_premium", telegram_data.get("premium", 0)))
+
+    # Собираем ВСЮ информацию из LZT в raw
+    full_raw = dict(item)
+
     return {
         "item_id": item_id,
         "title": item.get("title", ""),
         "description": item.get("description", ""),
         "price": price,
         "country": country,
-        "origin": (origin or "").lower(),
-        "resale_origin": (resale_origin or "").lower(),
+        "origin": (item.get("item_origin") or item.get("origin") or "").lower(),
+        "resale_origin": (item.get("resale_item_origin") or item.get("resale_origin") or "").lower(),
         "registration_type": registration_type,
         "spam_block": spam_block,
         "has_password": bool(has_password),
@@ -184,7 +218,14 @@ def _normalize_item(item):
         "reg_date": reg_date,
         "contacts_count": contacts_count,
         "has_premium": has_premium,
-        "raw": item,
+        "seller": item.get("seller", {}),
+        "seller_username": item.get("seller_username", ""),
+        "seller_rating": item.get("seller_rating", 0),
+        "item_hash": item.get("item_hash", ""),
+        "category_id": item.get("category_id", 0),
+        "category_name": item.get("category_name", ""),
+        "currency": item.get("currency", "rub"),
+        "raw": full_raw,  # ← ВСЯ информация из LZT
     }
 
 async def get_lzt_balance():
@@ -229,7 +270,6 @@ async def confirm_buy(item_id: int, price: int = None):
         return await lzt_request(endpoint, method="POST", json_data={"price": price})
     return await lzt_request(endpoint, method="POST")
 
-# FIX 23: verify purchase actually succeeded
 async def verify_purchase(item_id: int) -> dict:
     """Проверяем, что лот действительно куплен (статус sold/closed)."""
     endpoint = f"/{item_id}"
@@ -242,52 +282,92 @@ async def verify_purchase(item_id: int) -> dict:
         return {"ok": True, "status": status}
     return {"ok": False, "status": status, "error": f"unexpected_status_{status}"}
 
-async def search_telegram_accounts(country: str = None, account_type: str = None):
+# ========== УНИВЕРСАЛЬНЫЙ ПОИСК ==========
+
+CATEGORY_ENDPOINTS = {
+    "telegram": "/telegram",
+    "tiktok": "/tiktok",
+    "discord": "/discord",
+    "instagram": "/instagram",
+    "twitter": "/twitter",
+    "vk": "/vk",
+    "reddit": "/reddit",
+    "genshin": "/genshin-impact",
+    "minecraft": "/minecraft",
+    "steam": "/steam",
+    "fortnite": "/fortnite",
+    "valorant": "/valorant",
+    "roblox": "/roblox",
+    "epic": "/epic-games",
+    "spotify": "/spotify",
+    "netflix": "/netflix",
+    "chatgpt": "/openai",
+    "canva": "/canva",
+    "youtube": "/youtube",
+    "icloud": "/icloud",
+}
+
+async def search_items(category: str, country: str = None, account_type: str = None, extra_params: list = None):
+    """
+    Универсальный поиск по любой категории LZT.
+    category: ключ из CATEGORY_ENDPOINTS
+    country: код страны
+    account_type: для telegram — samoreg/autoreg
+    extra_params: дополнительные параметры
+    """
+    endpoint = CATEGORY_ENDPOINTS.get(category.lower(), f"/{category}")
     params = [
         ("page", "1"),
         ("nsb", "1"),
         ("order_by", "price_to_up"),
-        ("spam", "no"),
-        ("password", "no"),
         ("currency", "rub"),
     ]
+
     if country:
         params.append(("country[]", country))
-    if account_type == "autoreg":
-        params.append(("origin[]", "autoreg"))
-    elif account_type == "samoreg":
-        params.append(("origin[]", "self_registration"))
-    else:
-        for blocked in BLOCKED_ORIGINS:
-            params.append(("not_origin[]", blocked))
+
+    # Для Telegram — фильтрация по типу
+    if category.lower() == "telegram" and account_type:
+        if account_type == "autoreg":
+            params.append(("origin[]", "autoreg"))
+        elif account_type == "samoreg":
+            params.append(("origin[]", "self_registration"))
+        else:
+            for blocked in BLOCKED_ORIGINS:
+                params.append(("not_origin[]", blocked))
+
+    if extra_params:
+        params.extend(extra_params)
+
     global _last_search_ts
     async with _search_lock:
         wait = SEARCH_MIN_INTERVAL - (time.monotonic() - _last_search_ts)
         if wait > 0:
             await asyncio.sleep(wait)
-        data = await lzt_request("/telegram", method="GET", params=params)
+        data = await lzt_request(endpoint, method="GET", params=params)
         _last_search_ts = time.monotonic()
+
     if data.get("_token_expired"):
         return {"error": "token_expired", "items": []}
     http_status = data.get("_http_status", 200)
     if http_status != 200:
         logger.warning(f"LZT search failed: status={http_status}, body={str(data)[:300]}")
         return {"error": f"http_{http_status}", "items": []}
+
     items = _extract_items(data)
     total = data.get("totalItems")
     normalized = []
     for item in items:
-        norm = _normalize_item(item)
+        norm = _normalize_item(item, category=category)
         if norm:
-            if norm.get("has_password"):
-                continue
-            if norm.get("origin") in BLOCKED_ORIGINS:
-                continue
-            if norm.get("resale_origin") in BLOCKED_ORIGINS:
-                continue
             normalized.append(norm)
-    logger.info(f"LZT search returned {len(normalized)} valid items for country={country}, type={account_type}")
+
+    logger.info(f"LZT search returned {len(normalized)} valid items for category={category}, country={country}, type={account_type}")
     return {"items": normalized, "total": total}
+
+async def search_telegram_accounts(country: str = None, account_type: str = None):
+    """Обратная совместимость."""
+    return await search_items("telegram", country=country, account_type=account_type)
 
 async def fast_buy(item_id: int, price: int = None):
     endpoint = f"/{item_id}/fast-buy"
@@ -304,6 +384,7 @@ async def get_account_data_lzt(item_id: int):
         data["login"] = login_data.get("login") or item.get("login")
         data["password"] = login_data.get("password") or ""
         data["session"] = login_data.get("raw") or ""
+        return data
     return data
 
 async def get_item_secure_data(item_id: int):
@@ -326,7 +407,12 @@ async def validate_account_lzt(item_id: int):
     endpoint = f"/{item_id}/check-account"
     return await lzt_request(endpoint, method="POST")
 
-# FIX 25: demo_search uses negative IDs to avoid collision with real LZT IDs
+async def get_item_full_info(item_id: int) -> dict:
+    """Получает полную информацию о лоте с LZT."""
+    endpoint = f"/{item_id}"
+    return await lzt_request(endpoint, method="GET")
+
+# ========== DEMO ==========
 _demo_counter = 0
 
 def demo_search(country_code: str, account_type: str):
@@ -341,7 +427,7 @@ def demo_search(country_code: str, account_type: str):
     age = random.randint(10, 365)
     _demo_counter += 1
     return [{
-        "item_id": -(_demo_counter),  # negative ID, never collides with real LZT
+        "item_id": -(_demo_counter),
         "title": f"Telegram {account_type} {name}",
         "price": base_price,
         "country": country_code,
@@ -354,6 +440,10 @@ def demo_search(country_code: str, account_type: str):
         "reg_date": f"2024-{random.randint(1,12):02d}-{random.randint(1,28):02d}",
         "contacts_count": random.randint(0, 50),
         "has_premium": random.choice([True, False]),
+        "seller": {"username": "demo_seller", "rating": 5.0},
+        "seller_username": "demo_seller",
+        "seller_rating": 5.0,
+        "raw": {"demo": True},
     }]
 
 def demo_buy(item_id: int):
